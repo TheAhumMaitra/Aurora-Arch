@@ -21,47 +21,49 @@
 
 set -Eeuo pipefail
 
-# Colors for output
-RESET='\033[0m'
-RED='\033[1;38;5;203m'
-GREEN='\033[1;38;5;120m'
-YELLOW='\033[1;38;5;221m'
-BLUE='\033[1;38;5;111m'
-MAGENTA='\033[1;38;5;213m'
-CYAN='\033[1;38;5;159m'
-WHITE='\033[1;97m'
-DARK='\033[38;5;244m'
-BOLD='\033[1m'
-DIM='\033[2m'
-NC="$RESET"
+# Colors for output — minimal, TTY-safe (real ESC via $'', 8-color fallback on linux console)
+if [ -n "${NO_COLOR:-}" ] || [ "${TERM:-dumb}" = "dumb" ] || ! [ -t 1 ]; then
+  RESET=''; RED=''; GREEN=''; YELLOW=''; BLUE=''; MAGENTA=''; CYAN=''; WHITE=''; DARK=''; BOLD=''; DIM=''; NC=''
+elif [ "${TERM:-}" = "linux" ] || [ "$(tput colors 2>/dev/null || echo 8)" -lt 16 ]; then
+  # Arch TTY (linux console): only 8 basic colors, no 256/truecolor, no bright-white 97, no OSC.
+  RESET=$'\e[0m'; RED=$'\e[1;31m'; GREEN=$'\e[1;32m'; YELLOW=$'\e[1;33m'
+  BLUE=$'\e[1;34m'; MAGENTA=$'\e[1;35m'; CYAN=$'\e[1;36m'; WHITE=$'\e[1;37m'
+  DARK=$'\e[0m'; BOLD=$'\e[1m'; DIM=$'\e[2m'; NC="$RESET"
+else
+  RESET=$'\e[0m'
+  RED=$'\e[1;38;5;203m'
+  GREEN=$'\e[1;38;5;120m'
+  YELLOW=$'\e[1;38;5;221m'
+  BLUE=$'\e[1;38;5;111m'
+  MAGENTA=$'\e[1;38;5;213m'
+  CYAN=$'\e[1;38;5;159m'
+  WHITE=$'\e[1;97m'
+  DARK=$'\e[38;5;244m'
+  BOLD=$'\e[1m'
+  DIM=$'\e[2m'
+  NC="$RESET"
+fi
 
-# ---- Aurora TUI: deep violet background (presentation only, zero logic change) ----
-# Everything else in this script stays identical. When stdout is an interactive
-# terminal, the whole interface is painted on a deep violet background. Piped /
-# redirected output (logs, CI, `| head`) stays plain - the TUI auto-disables
-# after the log redirect. Override with:
-#   AURORA_TUI=on   request violet (still auto-disabled when piped/redirected)
-#   AURORA_TUI=off  disable violet entirely
-#   NO_COLOR=1      also disables it (respected convention, wins over AURORA_TUI)
+# ---- Aurora TUI: violet bg only where it can work ----
+# Disabled on: piped output, dumb/linux TTY, <16 colors, NO_COLOR=1.
 AURORA_TUI="${AURORA_TUI:-auto}"
 TUI_BG=''
 TUI_ACTIVE=false
-TUI_BG_TRUE=$'\033[48;2;26;10;54m'
-TUI_BG_256=$'\033[48;5;53m'
+TUI_BG_TRUE=$'\e[48;2;26;10;54m'
+TUI_BG_256=$'\e[48;5;53m'
 TUI_STDOUT_IS_TTY=false
 
 tui_want() {
-  # NO_COLOR wins over everything (respected convention).
   [ -z "${NO_COLOR:-}" ] || return 1
   case "$AURORA_TUI" in
-  on) return 0 ;;
+  on) ;;
   off) return 1 ;;
-  *)
-    [ -t 1 ] || return 1
-    [ "${TERM:-dumb}" = "dumb" ] && return 1
-    return 0
-    ;;
+  *) [ -t 1 ] || return 1 ;;
   esac
+  [ "${TERM:-dumb}" = "dumb" ] && return 1
+  [ "${TERM:-}" = "linux" ] && return 1
+  [ "$(tput colors 2>/dev/null || echo 0)" -ge 16 ] || return 1
+  return 0
 }
 
 tui_pick_bg() {
@@ -73,15 +75,12 @@ tui_pick_bg() {
 
 tui_shutdown() {
   if [ "$TUI_ACTIVE" = true ]; then
-    printf '\033[0m'
+    printf '\e[0m'
     TUI_ACTIVE=false
   fi
 }
 
 tui_init() {
-  # Record whether stdout STARTED as a TTY (before initialize_logging re-pipes
-  # it through tee). That decision is sticky for the whole run; colors ride
-  # through to the terminal but never touch the log file (stripped in logging).
   if [ -t 1 ]; then
     TUI_STDOUT_IS_TTY=true
   else
@@ -89,23 +88,20 @@ tui_init() {
   fi
   tui_want || return 0
   TUI_BG="$(tui_pick_bg)"
-  # Every UI line ends with ${NC} (= \033[0m), which would otherwise drop the
-  # background. Re-apply violet right after every reset so the TUI stays solid.
-  # Foreground colors (MAGENTA/BLUE/CYAN/GREEN/WHITE...) are untouched.
   NC="${RESET}${TUI_BG}"
   TUI_ACTIVE=true
-  # Paint violet (no clear here - clear_screen in main() does the single
-  # startup clear, so there is exactly one, not two).
   printf '%s' "$TUI_BG"
-  printf '\033]11;rgb:1a/0a/36\007' >/dev/tty 2>/dev/null || true
-  # Reset colors on exit/interrupt. ERR trap (error_handler) is separate.
+  # OSC-11 only on capable terminals, never on linux console.
+  if [ "${TERM:-}" != "linux" ]; then
+    printf '\e]11;rgb:1a/0a/36\e\\' >/dev/tty 2>/dev/null || true
+  fi
   trap tui_shutdown EXIT
   trap 'tui_shutdown; exit 130' INT TERM
 }
 
 tui_clear() {
   if [ "$TUI_ACTIVE" = true ]; then
-    printf '%s\033[2J\033[H' "$TUI_BG"
+    printf '%s\e[2J\e[H' "$TUI_BG"
   else
     command -v clear &>/dev/null && clear || true
   fi
@@ -114,7 +110,7 @@ tui_clear() {
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_LOG="$HOME/.local/share/Aurora/install.log"
-BACKUP_DIR="$HOME/.config/aurora_backup_$(date +%s)"
+BACKUP_DIR="$HOME/.local/share/Aurora/backups/aurora_backup_$(date +%s)"
 INTERACTIVE=true
 DRY_RUN=false
 CURRENT_STEP=0
@@ -669,69 +665,16 @@ prepare_install_log() {
   : >"$INSTALL_LOG"
 }
 
-copy_hypr_children_without_user() {
-  local src_hypr="$1"
-  local dest_hypr="$2"
-  local item
-  local item_name
-
-  [ -d "$src_hypr" ] || return 0
-  mkdir -p "$dest_hypr"
-
-  while IFS= read -r -d '' item; do
-    item_name="${item##*/}"
-    [ "$item_name" = "User" ] && continue
-    cp -rfv "$item" "$dest_hypr/"
-  done < <(find "$src_hypr" -mindepth 1 -maxdepth 1 -print0)
-}
-
-backup_hypr_without_user() {
-  local target_hypr="$1"
-  local backup_hypr="$2"
-  local item
-  local item_name
-
-  [ -d "$target_hypr" ] || return 0
-  mkdir -p "$backup_hypr"
-
-  while IFS= read -r -d '' item; do
-    item_name="${item##*/}"
-    [ "$item_name" = "User" ] && continue
-    cp -r "$item" "$backup_hypr/"
-  done < <(find "$target_hypr" -mindepth 1 -maxdepth 1 -print0)
-}
-
-remove_hypr_children_without_user() {
-  local target_hypr="$1"
-  local item
-  local item_name
-
-  [ -d "$target_hypr" ] || return 0
-
-  while IFS= read -r -d '' item; do
-    item_name="${item##*/}"
-    [ "$item_name" = "User" ] && continue
-    rm -rf "$item"
-  done < <(find "$target_hypr" -mindepth 1 -maxdepth 1 -print0)
-}
-
 restore_config_from_backup() {
   local config_name="$1"
   local backup_root="$2"
   local backup_item="$backup_root/$config_name"
   local target_item="$HOME/.config/$config_name"
 
-  [ -d "$backup_item" ] || return 0
+  [ -e "$backup_item" ] || [ -L "$backup_item" ] || return 0
 
-  if [ "$config_name" = "hypr" ]; then
-    mkdir -p "$target_item"
-    remove_hypr_children_without_user "$target_item"
-    copy_hypr_children_without_user "$backup_item" "$target_item"
-    return 0
-  fi
-
-  rm -rf "$target_item" 2>/dev/null
-  cp -r "$backup_item" "$HOME/.config/" 2>/dev/null
+  rm -rf -- "$target_item"
+  cp -a -- "$backup_item" "$HOME/.config/"
 }
 
 # Rollback on critical failure (Issue #8)
@@ -1302,27 +1245,13 @@ build_rust_scripts() {
   # Guarantee cargo/rustup/cc exist even if install_packages was skipped.
   ensure_rust_toolchain
 
-  local script_dir="$SCRIPT_DIR/dotfiles/.config/hypr/scripts"
-  local old_pwd="$PWD"
+  # The live copy: repo was already deployed to $HOME/.config by copy_dotfiles.
+  local script_dir="$HOME/.config/hypr/scripts"
 
-  if [ ! -d "$script_dir" ]; then
-    log_error "Scripts directory not found at $script_dir"
-    print_error "Scripts directory not found at $script_dir"
-    rollback_on_failure "Scripts directory missing"
-    return 1
-  fi
-
-  # Verify Cargo.toml exists (Issue #4 - project validation)
-  if [ ! -f "$script_dir/Cargo.toml" ]; then
+  [ -f "$script_dir/Cargo.toml" ] || {
     log_error "Cargo.toml not found in $script_dir - invalid Rust project"
     print_error "Invalid Rust project structure at $script_dir"
     rollback_on_failure "Invalid Rust project"
-    return 1
-  fi
-
-  cd "$script_dir" || {
-    log_error "Failed to change directory to $script_dir"
-    rollback_on_failure "Cannot access scripts directory"
     return 1
   }
 
@@ -1334,26 +1263,18 @@ build_rust_scripts() {
     log_info "Starting cargo install for Aurora scripts"
   fi
 
-  # Run cargo install with error capture (Issue #4 & #7)
-  local cargo_log="$INSTALL_LOG.cargo_err"
-  if ! cargo install --path . 2>"$cargo_log"; then
-    local cargo_error=$(cat "$cargo_log" 2>/dev/null | tail -20 || echo "Unknown error")
-    log_error "Cargo install failed: $cargo_error"
-    print_error "Failed to build Rust scripts"
-    print_warning "Last 20 lines of error log:"
-    echo "$cargo_error" | sed 's/^/  /'
-    rm -f "$cargo_log"
+  # Subshell: no cd/old_pwd dance, PWD always restored even on failure/return.
+  (
+    cd -- "$script_dir" || exit 1
+    exec cargo install --path . --locked
+  ) || {
+    print_error "Failed to build Rust scripts in $script_dir"
     rollback_on_failure "Cargo build failed"
-    cd "$old_pwd" || true
     return 1
-  fi
+  }
 
-  rm -f "$cargo_log"
   log_info "Successfully installed Rust scripts to ~/.cargo/bin"
   print_success "Rust scripts installed successfully to ~/.cargo/bin"
-
-  cd "$old_pwd" || true
-  return 0
 }
 
 install_rust_packages() {
@@ -1515,59 +1436,31 @@ copy_dotfiles() {
 
   local config_src="$SCRIPT_DIR/dotfiles/.config"
   local config_dest="$HOME/.config"
-  local config_dir
-  local config_name
-  local target_item
+  local src name target
 
-  if [ ! -d "$config_src" ]; then
-    print_error "Dotfiles directory not found at $config_src"
-    exit 1
-  fi
-
-  mkdir -p "$config_dest"
+  [ -d "$config_src" ] || { print_error "Dotfiles directory not found at $config_src"; return 1; }
+  mkdir -p "$config_dest" "$BACKUP_DIR"
 
   if [ "$DRY_RUN" = true ]; then
-    print_warning "[DRY RUN] Would backup existing Aurora configs to $BACKUP_DIR"
-    print_warning "[DRY RUN] Would remove existing Aurora config files and directories, preserving ~/.config/hypr/User"
-    print_warning "[DRY RUN] Would copy config files from $config_src to $config_dest"
-    return
+    print_warning "[DRY RUN] Would backup replaced entries to $BACKUP_DIR"
+    print_warning "[DRY RUN] Would replace $config_dest entirely from $config_src"
+    return 0
   fi
 
-  print_warning "Forcefully replacing existing Aurora configs..."
-  mkdir -p "$BACKUP_DIR"
-
-  while IFS= read -r -d '' config_dir; do
-    config_name="${config_dir##*/}"
-    target_item="$config_dest/$config_name"
-
-    if [ "$config_name" = "hypr" ]; then
-      rm -rf "$BACKUP_DIR/$config_name"
-      backup_hypr_without_user "$target_item" "$BACKUP_DIR/$config_name"
-      mkdir -p "$target_item"
-      remove_hypr_children_without_user "$target_item"
-      continue
+  print_warning "Forcefully replacing $config_dest from $config_src ..."
+  # For each top-level entry in the repo: back up, wipe, then copy fresh.
+  # rm before cp = no stale-file merges. cp -a = preserves symlinks/modes.
+  while IFS= read -r -d '' src; do
+    name="${src##*/}"
+    target="$config_dest/$name"
+    if [ -e "$target" ] || [ -L "$target" ]; then
+      cp -a -- "$target" "$BACKUP_DIR/" && rm -rf -- "$target"
     fi
-
-    if [ -e "$target_item" ] || [ -L "$target_item" ]; then
-      rm -rf "$BACKUP_DIR/$config_name"
-      cp -r "$target_item" "$BACKUP_DIR/"
-      rm -rf "$target_item"
-    fi
-  done < <(find "$config_src" -mindepth 1 -maxdepth 1 -print0)
-
-  while IFS= read -r -d '' config_dir; do
-    config_name="${config_dir##*/}"
-
-    if [ "$config_name" = "hypr" ]; then
-      copy_hypr_children_without_user "$config_dir" "$config_dest/$config_name"
-      continue
-    fi
-
-    cp -rfv "$config_dir" "$config_dest/"
+    cp -a -- "$src" "$config_dest/"
   done < <(find "$config_src" -mindepth 1 -maxdepth 1 -print0)
 
   log_command "Configuration files installed"
-  print_success "Configuration files installed successfully"
+  print_success "Configuration files installed successfully (backup: $BACKUP_DIR)"
 }
 
 # Ensure ~/.cargo/bin is on PATH for this installer process AND persisted
@@ -1709,7 +1602,7 @@ verify_installation() {
   ensure_cargo_bin_in_path
 
   local cargo_bin="$HOME/.cargo/bin"
-  local script_dir="$SCRIPT_DIR/dotfiles/.config/hypr/scripts"
+  local script_dir="$HOME/.config/hypr/scripts"
   local required_bins=()
   local missing_bins=()
   local bin
