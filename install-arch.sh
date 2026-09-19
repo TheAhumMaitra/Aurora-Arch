@@ -23,12 +23,32 @@ set -Eeuo pipefail
 
 # Colors for output — minimal, TTY-safe (real ESC via $'', 8-color fallback on linux console)
 if [ -n "${NO_COLOR:-}" ] || [ "${TERM:-dumb}" = "dumb" ] || ! [ -t 1 ]; then
-  RESET=''; RED=''; GREEN=''; YELLOW=''; BLUE=''; MAGENTA=''; CYAN=''; WHITE=''; DARK=''; BOLD=''; DIM=''; NC=''
+  RESET=''
+  RED=''
+  GREEN=''
+  YELLOW=''
+  BLUE=''
+  MAGENTA=''
+  CYAN=''
+  WHITE=''
+  DARK=''
+  BOLD=''
+  DIM=''
+  NC=''
 elif [ "${TERM:-}" = "linux" ] || [ "$(tput colors 2>/dev/null || echo 8)" -lt 16 ]; then
   # Arch TTY (linux console): only 8 basic colors, no 256/truecolor, no bright-white 97, no OSC.
-  RESET=$'\e[0m'; RED=$'\e[1;31m'; GREEN=$'\e[1;32m'; YELLOW=$'\e[1;33m'
-  BLUE=$'\e[1;34m'; MAGENTA=$'\e[1;35m'; CYAN=$'\e[1;36m'; WHITE=$'\e[1;37m'
-  DARK=$'\e[0m'; BOLD=$'\e[1m'; DIM=$'\e[2m'; NC="$RESET"
+  RESET=$'\e[0m'
+  RED=$'\e[1;31m'
+  GREEN=$'\e[1;32m'
+  YELLOW=$'\e[1;33m'
+  BLUE=$'\e[1;34m'
+  MAGENTA=$'\e[1;35m'
+  CYAN=$'\e[1;36m'
+  WHITE=$'\e[1;37m'
+  DARK=$'\e[0m'
+  BOLD=$'\e[1m'
+  DIM=$'\e[2m'
+  NC="$RESET"
 else
   RESET=$'\e[0m'
   RED=$'\e[1;38;5;203m'
@@ -574,6 +594,8 @@ install_aur_helper() {
     return 0
   fi
 
+  clear_stale_pacman_lock || wait_for_pacman_settle || true
+
   # Check for base-devel before attempting to build
   if ! pacman -Q base-devel &>/dev/null; then
     print_warning "base-devel is required to build yay from source"
@@ -670,11 +692,21 @@ restore_config_from_backup() {
   local backup_root="$2"
   local backup_item="$backup_root/$config_name"
   local target_item="$HOME/.config/$config_name"
+  local exclude_name
 
-  [ -e "$backup_item" ] || [ -L "$backup_item" ] || return 0
+  [ -d "$backup_item" ] || return 0
 
-  rm -rf -- "$target_item"
-  cp -a -- "$backup_item" "$HOME/.config/"
+  exclude_name="$(preserve_child_for "$config_name")"
+
+  if [ -n "$exclude_name" ]; then
+    mkdir -p "$target_item"
+    remove_children_without "$target_item" "$exclude_name"
+    copy_children_without "$backup_item" "$target_item" "$exclude_name"
+    return 0
+  fi
+
+  rm -rf "$target_item" 2>/dev/null
+  cp -r "$backup_item" "$HOME/.config/" 2>/dev/null
 }
 
 # Rollback on critical failure (Issue #8)
@@ -692,7 +724,7 @@ rollback_on_failure() {
     echo
 
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-      for config_dir in hypr waybar kitty fish rofi; do
+      for config_dir in hypr aurora waybar kitty fish rofi; do
         restore_config_from_backup "$config_dir" "$BACKUP_DIR"
       done
       print_success "Configs restored from backup"
@@ -975,33 +1007,66 @@ install_packages() {
 
   print_warning "Installing Aurora dependencies (requires sudo)..."
 
+  # pacman serializes every transaction with /var/lib/pacman/db.lck. A stale
+  # lock left behind by a killed process (or a package manager running right
+  # now) makes every following pacman call fail with "unable to lock database".
+  # Clear a leftover lock up front, then run ONE transaction for all packages:
+  # the lock is taken once instead of once per package.
+  if ! clear_stale_pacman_lock; then
+    print_warning "A package manager is already running; waiting for it to release the pacman database lock..."
+    wait_for_pacman_settle || print_warning "Timed out waiting for the running package manager"
+  fi
+
   local failed_packages=()
   local installed_count=0
   local total_packages=0
+  local -a pacman_to_install=()
+  local -a install_list=()
+  local category package item seen
 
-  # Install pacman packages
+  # Gather every missing pacman package into one flat, de-duplicated list.
   for category in core daemons ui utils toolchain build; do
     for package in ${pacman_package_groups[$category]}; do
       ((++total_packages))
-
       if pacman -Q "$package" &>/dev/null; then
         print_success "Package '$package' already installed"
       else
-        if sudo pacman -S "$package" --noconfirm --needed 2>/dev/null; then
-          ((++installed_count))
-          log_command "Installed: $package"
-        else
-          failed_packages+=("$package")
-          log_command "Failed to install: $package"
-        fi
+        pacman_to_install+=("$package")
       fi
     done
   done
 
-  if [ ${#failed_packages[@]} -gt 0 ]; then
-    print_warning "Some pacman packages failed (${#failed_packages[@]}/${total_packages}):"
-    printf '%s\n' "${failed_packages[@]}" | sed 's/^/  - /'
-    echo ""
+  seen=" "
+  for item in "${pacman_to_install[@]}"; do
+    if [[ "$seen" != *"|$item|"* ]]; then
+      install_list+=("$item")
+      seen+="|$item|"
+    fi
+  done
+
+  if [ ${#install_list[@]} -gt 0 ]; then
+    log_info "Installing ${#install_list[@]} packages in a single pacman transaction"
+    if ! sudo pacman -S --noconfirm --needed "${install_list[@]}"; then
+      print_warning "The pacman transaction reported a failure; retrying individually to isolate bad packages"
+      log_warn "pacman batch install failed; falling back to per-package installs"
+      for package in "${install_list[@]}"; do
+        if ! pacman -Q "$package" &>/dev/null; then
+          sudo pacman -S "$package" --noconfirm --needed || true
+        fi
+      done
+    fi
+
+    # Verify the end state per package; with --needed every still-missing name
+    # is a genuine failure.
+    for package in "${install_list[@]}"; do
+      if pacman -Q "$package" &>/dev/null; then
+        ((++installed_count))
+        log_command "Installed: $package"
+      else
+        failed_packages+=("$package")
+        log_command "Failed to install: $package"
+      fi
+    done
   fi
 
   # Ensure yay exists for AUR package installation.
@@ -1013,23 +1078,45 @@ install_packages() {
   fi
 
   if command -v yay &>/dev/null; then
+    local -a aur_to_install=()
     for category in aur_extras; do
       for package in ${yay_package_groups[$category]}; do
         ((++total_packages))
         if pacman -Q "$package" &>/dev/null; then
           print_success "AUR package '$package' already installed"
         else
-          if yay -S "$package" --noconfirm --needed 2>/dev/null; then
-            ((++installed_count))
-            log_command "Installed AUR package: $package"
-          else
-            print_warning "Failed to install AUR package: $package"
-          fi
+          aur_to_install+=("$package")
         fi
       done
     done
+
+    if [ ${#aur_to_install[@]} -gt 0 ]; then
+      # One yay transaction (yay passes --needed through to pacman), so the
+      # pacman database lock is only taken once for all AUR packages too.
+      log_info "Installing ${#aur_to_install[@]} AUR packages in a single yay transaction"
+      if ! yay -S --noconfirm --needed "${aur_to_install[@]}"; then
+        print_warning "The yay transaction reported a failure; verifying which packages installed"
+        log_warn "yay batch install failed; remaining missing packages are reported below"
+      fi
+
+      for package in "${aur_to_install[@]}"; do
+        if pacman -Q "$package" &>/dev/null; then
+          ((++installed_count))
+          log_command "Installed AUR package: $package"
+        else
+          failed_packages+=("$package")
+          log_command "Failed to install AUR package: $package"
+        fi
+      done
+    fi
   else
     print_warning "Skipping AUR packages because yay is unavailable"
+  fi
+
+  if [ ${#failed_packages[@]} -gt 0 ]; then
+    print_warning "Some packages failed (${#failed_packages[@]}/${total_packages}):"
+    printf '%s\n' "${failed_packages[@]}" | sed 's/^/  - /'
+    echo ""
   fi
 
   print_success "Package installation completed ($installed_count/$total_packages packages installed/updated)"
@@ -1436,31 +1523,138 @@ copy_dotfiles() {
 
   local config_src="$SCRIPT_DIR/dotfiles/.config"
   local config_dest="$HOME/.config"
-  local src name target
+  local config_dir
+  local config_name
+  local target_item
+  local exclude_name
 
-  [ -d "$config_src" ] || { print_error "Dotfiles directory not found at $config_src"; return 1; }
-  mkdir -p "$config_dest" "$BACKUP_DIR"
+  [ -d "$config_src" ] || {
+    print_error "Dotfiles directory not found at $config_src"
+    return 1
+  }
+  mkdir -p "$config_dest"
 
   if [ "$DRY_RUN" = true ]; then
-    print_warning "[DRY RUN] Would backup replaced entries to $BACKUP_DIR"
-    print_warning "[DRY RUN] Would replace $config_dest entirely from $config_src"
+    print_warning "[DRY RUN] Would backup existing Aurora configs to $BACKUP_DIR"
+    print_warning "[DRY RUN] Would remove existing Aurora config files and directories, preserving ~/.config/hypr/User, ~/.config/aurora.toml and ~/.config/aurora/palette.toml"
+    print_warning "[DRY RUN] Would copy config files from $config_src to $config_dest"
     return 0
   fi
 
-  print_warning "Forcefully replacing $config_dest from $config_src ..."
-  # For each top-level entry in the repo: back up, wipe, then copy fresh.
-  # rm before cp = no stale-file merges. cp -a = preserves symlinks/modes.
-  while IFS= read -r -d '' src; do
-    name="${src##*/}"
-    target="$config_dest/$name"
-    if [ -e "$target" ] || [ -L "$target" ]; then
-      cp -a -- "$target" "$BACKUP_DIR/" && rm -rf -- "$target"
+  print_warning "Forcefully replacing existing Aurora configs..."
+  mkdir -p "$BACKUP_DIR"
+
+  # Phase 1 - back up the existing configs (skipping personal files such as
+  # hypr/User and aurora/palette.toml that must survive the copy), then wipe.
+  while IFS= read -r -d '' config_dir; do
+    config_name="${config_dir##*/}"
+    target_item="$config_dest/$config_name"
+
+    # Top-level personal file managed by the aurora tool: never touch it.
+    [ "$config_name" = "aurora.toml" ] && continue
+
+    exclude_name="$(preserve_child_for "$config_name")"
+
+    if [ -n "$exclude_name" ]; then
+      rm -rf "$BACKUP_DIR/$config_name"
+      backup_children_without "$target_item" "$BACKUP_DIR/$config_name" "$exclude_name"
+      mkdir -p "$target_item"
+      remove_children_without "$target_item" "$exclude_name"
+      continue
     fi
-    cp -a -- "$src" "$config_dest/"
+
+    if [ -e "$target_item" ] || [ -L "$target_item" ]; then
+      rm -rf "$BACKUP_DIR/$config_name"
+      cp -r "$target_item" "$BACKUP_DIR/"
+      rm -rf "$target_item"
+    fi
+  done < <(find "$config_src" -mindepth 1 -maxdepth 1 -print0)
+
+  # Phase 2 - copy fresh configs. hypr/User and aurora/palette.toml are
+  # preserved: an existing copy wins over the shipped one, while fresh
+  # installs still receive the shipped default.
+  while IFS= read -r -d '' config_dir; do
+    config_name="${config_dir##*/}"
+
+    [ "$config_name" = "aurora.toml" ] && continue
+
+    exclude_name="$(preserve_child_for "$config_name")"
+
+    if [ -n "$exclude_name" ]; then
+      copy_children_without "$config_dir" "$config_dest/$config_name" "$exclude_name"
+      continue
+    fi
+
+    cp -rfv "$config_dir" "$config_dest/"
   done < <(find "$config_src" -mindepth 1 -maxdepth 1 -print0)
 
   log_command "Configuration files installed"
   print_success "Configuration files installed successfully (backup: $BACKUP_DIR)"
+}
+
+# Name of the "protected" child inside a config dir that must survive the
+# copy, or empty string if the whole dir can be replaced freely.
+preserve_child_for() {
+  case "$1" in
+    hypr) echo "User" ;;
+    aurora) echo "palette.toml" ;;
+  esac
+}
+
+# Copy every child of a source dir. The named child is skipped only when it
+# already exists at the destination, so existing personal tweaks (hypr/User,
+# aurora/palette.toml) survive while fresh installs still get the shipped files.
+copy_children_without() {
+  local src_dir="$1"
+  local dest_dir="$2"
+  local exclude_name="$3"
+  local item
+  local item_name
+
+  [ -d "$src_dir" ] || return 0
+  mkdir -p "$dest_dir"
+
+  while IFS= read -r -d '' item; do
+    item_name="${item##*/}"
+    if [ "$item_name" = "$exclude_name" ] && [ -e "$dest_dir/$item_name" ]; then
+      continue
+    fi
+    cp -rfv "$item" "$dest_dir/"
+  done < <(find "$src_dir" -mindepth 1 -maxdepth 1 -print0)
+}
+
+# Back up every child of a source dir except the named one.
+backup_children_without() {
+  local src_dir="$1"
+  local backup_dir="$2"
+  local exclude_name="$3"
+  local item
+  local item_name
+
+  [ -d "$src_dir" ] || return 0
+  mkdir -p "$backup_dir"
+
+  while IFS= read -r -d '' item; do
+    item_name="${item##*/}"
+    [ "$item_name" = "$exclude_name" ] && continue
+    cp -r "$item" "$backup_dir/"
+  done < <(find "$src_dir" -mindepth 1 -maxdepth 1 -print0)
+}
+
+# Remove every child of a dir except the named one.
+remove_children_without() {
+  local target_dir="$1"
+  local exclude_name="$2"
+  local item
+  local item_name
+
+  [ -d "$target_dir" ] || return 0
+
+  while IFS= read -r -d '' item; do
+    item_name="${item##*/}"
+    [ "$item_name" = "$exclude_name" ] && continue
+    rm -rf "$item"
+  done < <(find "$target_dir" -mindepth 1 -maxdepth 1 -print0)
 }
 
 # Ensure ~/.cargo/bin is on PATH for this installer process AND persisted
@@ -1641,6 +1835,26 @@ verify_installation() {
     echo "  Example installed binary: $cargo_bin/$first_bin"
     echo "  Reload your shell, then run: command -v $first_bin"
   fi
+}
+
+# pacman serializes every transaction with /var/lib/pacman/db.lck. A lock
+# held by a live process is normal; a stale lock left by a killed process
+# makes every following pacman call fail with "unable to lock database".
+# Only remove a lock that is NOT held by a running package manager.
+clear_stale_pacman_lock() {
+  local pacman_lock="/var/lib/pacman/db.lck"
+
+  pgrep -x pacman &>/dev/null && return 1
+  pgrep -x yay &>/dev/null && return 1
+  pgrep -x makepkg &>/dev/null && return 1
+
+  if [ -e "$pacman_lock" ]; then
+    print_warning "Removing stale pacman database lock: $pacman_lock"
+    log_warn "Removing stale pacman database lock: $pacman_lock"
+    sudo rm -f -- "$pacman_lock" || return 1
+  fi
+
+  return 0
 }
 
 wait_for_pacman_settle() {
@@ -1838,6 +2052,7 @@ EOF
     if [[ $REPLY =~ ^[Yy]$ ]]; then
       print_warning "Restoring configs..."
       restore_config_from_backup "hypr" "$latest_backup"
+      restore_config_from_backup "aurora" "$latest_backup"
       restore_config_from_backup "waybar" "$latest_backup"
       restore_config_from_backup "kitty" "$latest_backup"
       restore_config_from_backup "fish" "$latest_backup"
