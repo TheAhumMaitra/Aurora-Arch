@@ -35,6 +35,82 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC="$RESET"
 
+# ---- Aurora TUI: deep violet background (presentation only, zero logic change) ----
+# Everything else in this script stays identical. When stdout is an interactive
+# terminal, the whole interface is painted on a deep violet background. Piped /
+# redirected output (logs, CI, `| head`) stays plain - the TUI auto-disables
+# after the log redirect. Override with:
+#   AURORA_TUI=on   request violet (still auto-disabled when piped/redirected)
+#   AURORA_TUI=off  disable violet entirely
+#   NO_COLOR=1      also disables it (respected convention, wins over AURORA_TUI)
+AURORA_TUI="${AURORA_TUI:-auto}"
+TUI_BG=''
+TUI_ACTIVE=false
+TUI_BG_TRUE=$'\033[48;2;26;10;54m'
+TUI_BG_256=$'\033[48;5;53m'
+TUI_STDOUT_IS_TTY=false
+
+tui_want() {
+  # NO_COLOR wins over everything (respected convention).
+  [ -z "${NO_COLOR:-}" ] || return 1
+  case "$AURORA_TUI" in
+  on) return 0 ;;
+  off) return 1 ;;
+  *)
+    [ -t 1 ] || return 1
+    [ "${TERM:-dumb}" = "dumb" ] && return 1
+    return 0
+    ;;
+  esac
+}
+
+tui_pick_bg() {
+  case "${COLORTERM:-}" in
+  *truecolor* | *24bit*) printf '%s' "$TUI_BG_TRUE" ;;
+  *) printf '%s' "$TUI_BG_256" ;;
+  esac
+}
+
+tui_shutdown() {
+  if [ "$TUI_ACTIVE" = true ]; then
+    printf '\033[0m'
+    TUI_ACTIVE=false
+  fi
+}
+
+tui_init() {
+  # Record whether stdout STARTED as a TTY (before initialize_logging re-pipes
+  # it through tee). That decision is sticky for the whole run; colors ride
+  # through to the terminal but never touch the log file (stripped in logging).
+  if [ -t 1 ]; then
+    TUI_STDOUT_IS_TTY=true
+  else
+    TUI_STDOUT_IS_TTY=false
+  fi
+  tui_want || return 0
+  TUI_BG="$(tui_pick_bg)"
+  # Every UI line ends with ${NC} (= \033[0m), which would otherwise drop the
+  # background. Re-apply violet right after every reset so the TUI stays solid.
+  # Foreground colors (MAGENTA/BLUE/CYAN/GREEN/WHITE...) are untouched.
+  NC="${RESET}${TUI_BG}"
+  TUI_ACTIVE=true
+  # Paint violet (no clear here - clear_screen in main() does the single
+  # startup clear, so there is exactly one, not two).
+  printf '%s' "$TUI_BG"
+  printf '\033]11;rgb:1a/0a/36\007' >/dev/tty 2>/dev/null || true
+  # Reset colors on exit/interrupt. ERR trap (error_handler) is separate.
+  trap tui_shutdown EXIT
+  trap 'tui_shutdown; exit 130' INT TERM
+}
+
+tui_clear() {
+  if [ "$TUI_ACTIVE" = true ]; then
+    printf '%s\033[2J\033[H' "$TUI_BG"
+  else
+    command -v clear &>/dev/null && clear || true
+  fi
+}
+
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_LOG="$HOME/.local/share/Aurora/install.log"
@@ -64,6 +140,14 @@ error_handler() {
 trap 'error_handler $LINENO' ERR
 
 # Structured Logging System
+# Console output may carry colors / the violet TUI background on a real TTY.
+# The log FILE always stays plain: console styling is stripped before writing.
+ui_strip() {
+  # ${NC} is RESET+BG on TUI, so a reset can be followed by the violet BG code.
+  # Also strip clear-screen/home-cursor and OSC-11 sequences from the log.
+  sed -e 's/\x1b\[[0-9;]*m//g' -e 's/\x1b\]11;[^\a]*\a//g' -e 's/\x1b\[2J//g' -e 's/\x1b\[H//g'
+}
+
 log_message() {
   local level="$1"
   shift
@@ -113,7 +197,11 @@ print_rule() {
 }
 
 print_spacer() {
-  echo ""
+  if [ "$TUI_ACTIVE" = true ]; then
+    printf '%s\n' "$TUI_BG"
+  else
+    echo ""
+  fi
 }
 
 render_banner() {
@@ -149,7 +237,7 @@ print_error() {
 }
 
 clear_screen() {
-  command -v clear &>/dev/null && clear || true
+  tui_clear
 }
 
 next_step() {
@@ -249,8 +337,11 @@ discover_cargo_binaries() {
 }
 
 initialize_logging() {
-  # Stream all output to both console and log file.
-  exec > >(tee -a "$INSTALL_LOG")
+  # Split-stream logging: the terminal keeps FULL color output (foreground
+  # colors + violet TUI background), while install.log gets a plain-text copy
+  # with all escape sequences stripped. tee writes the raw stream to the
+  # screen AND pipes a stripped copy to the log file.
+  exec > >(tee >(ui_strip >>"$INSTALL_LOG"))
   exec 2>&1
 }
 
@@ -2015,7 +2106,17 @@ main() {
   esac
 
   prepare_install_log
+  tui_init
   initialize_logging
+  # initialize_logging re-pipes stdout through tee (so `[ -t 1 ]` is false from
+  # here on). Stick with the pre-redirect TTY decision recorded in tui_init:
+  # on a real terminal the violet codes ride through tee to the screen.
+  if [ "$TUI_ACTIVE" = true ] && [ "$TUI_STDOUT_IS_TTY" != true ]; then
+    NC="$RESET"
+    TUI_BG=''
+    TUI_ACTIVE=false
+    trap - EXIT INT TERM
+  fi
 
   # ~/.cargo/bin must be on PATH before ANY tool detection (cargo/rustup in
   # check_dependencies, install_packages, etc.). Export + persist early so
