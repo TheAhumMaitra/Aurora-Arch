@@ -490,18 +490,26 @@ install_aur_helper() {
   # Check for base-devel before attempting to build
   if ! pacman -Q base-devel &>/dev/null; then
     print_warning "base-devel is required to build yay from source"
-    read -p "Install base-devel? (y/n) " -n 1 -r
-    echo
+    if [ "$INTERACTIVE" = false ]; then
+      print_warning "Non-interactive mode: automatically installing base-devel..."
+      sudo pacman -S base-devel --noconfirm --needed || {
+        print_error "Failed to install base-devel"
+        return 1
+      }
+    else
+      read -p "Install base-devel? (y/n) " -n 1 -r
+      echo
 
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-      print_error "Cannot proceed without base-devel"
-      return 1
+      if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        print_error "Cannot proceed without base-devel"
+        return 1
+      fi
+
+      sudo pacman -S base-devel --noconfirm --needed || {
+        print_error "Failed to install base-devel"
+        return 1
+      }
     fi
-
-    sudo pacman -S base-devel --noconfirm || {
-      print_error "Failed to install base-devel"
-      return 1
-    }
   fi
 
   print_warning "AUR helper 'yay' not found. Installing..."
@@ -663,36 +671,79 @@ rollback_on_failure() {
 }
 
 # Check dependencies
+# NOTE: cargo / rustup / clang / base-devel are installed automatically by
+# install_packages + ensure_rust_toolchain later in the flow, so this check
+# only hard-requires git (needed immediately). Everything else is reported
+# here and then installed automatically - it never aborts the install.
 check_dependencies() {
   next_step "Checking system dependencies"
 
-  local missing_deps=()
-
-  # Check for cargo
-  if ! command -v cargo &>/dev/null; then
-    missing_deps+=("cargo (Rust package manager)")
-  fi
-
-  # Check for git
+  # git is needed right away (AUR helper, lazyvim, etc.). Try to install it
+  # automatically instead of aborting.
   if ! command -v git &>/dev/null; then
-    missing_deps+=("git")
+    print_warning "git not found - attempting to install it automatically..."
+    if command -v pacman &>/dev/null; then
+      sudo pacman -S git --noconfirm --needed || {
+        print_error "Failed to install git automatically. Install with: sudo pacman -S git"
+        exit 1
+      }
+    else
+      print_error "Missing required dependency: git"
+      exit 1
+    fi
   fi
 
-  # Check for make
+  local will_install=()
+
+  if ! command -v cargo &>/dev/null; then
+    will_install+=("cargo (via rust + rustup packages)")
+  fi
+  if ! command -v rustup &>/dev/null; then
+    will_install+=("rustup (Rust toolchain manager)")
+  fi
+  if ! pacman -Q base-devel &>/dev/null && ! command -v make &>/dev/null; then
+    will_install+=("base-devel (gcc, make, pkg-config, autoconf, ...)")
+  fi
+  if ! command -v clang &>/dev/null; then
+    will_install+=("clang (C/C++ frontend for Rust crates like bindgen/cc)")
+  fi
+  if ! command -v cc &>/dev/null; then
+    will_install+=("cc (via base-devel/gcc)")
+  fi
+  if ! command -v c++ &>/dev/null; then
+    will_install+=("c++ (via base-devel/gcc)")
+  fi
   if ! command -v make &>/dev/null; then
-    missing_deps+=("make")
+    will_install+=("make (via base-devel)")
+  fi
+  if ! command -v cmake &>/dev/null; then
+    will_install+=("cmake")
+  fi
+  if ! command -v pkg-config &>/dev/null && ! command -v pkgconf &>/dev/null; then
+    will_install+=("pkg-config")
+  fi
+  if ! command -v curl &>/dev/null; then
+    will_install+=("curl (needed for rustup)")
   fi
 
-  if [ ${#missing_deps[@]} -gt 0 ]; then
-    print_error "Missing required dependencies:"
-    printf '%s\n' "${missing_deps[@]}" | sed 's/^/  - /'
+  if [ ${#will_install[@]} -gt 0 ]; then
+    # De-duplicate while preserving order
+    local uniq=()
+    local seen=" "
+    local item
+    for item in "${will_install[@]}"; do
+      if [[ "$seen" != *" | $item | "* ]]; then
+        uniq+=("$item")
+        seen+="| $item | "
+      fi
+    done
+    print_warning "The following toolchain components are missing and will be installed automatically:"
+    printf '%s\n' "${uniq[@]}" | sed 's/^/  - /'
     echo ""
-    print_warning "Install with: sudo pacman -S rustup git base-devel"
-    echo ""
-    exit 1
+    log_info "Missing toolchain components will be installed: ${uniq[*]}"
   fi
 
-  print_success "All required dependencies found"
+  print_success "Dependency check passed (missing toolchain will be auto-installed)"
 }
 
 # Validate Hyprland setup
@@ -747,9 +798,7 @@ install_packages() {
   fi
 
   if [ "$INTERACTIVE" = false ]; then
-    print_warning "Running in non-interactive mode - skipping package installation"
-    print_warning "Install packages manually with: pacman -S <package>"
-    return
+    print_warning "Running in non-interactive mode - installing packages without prompting"
   fi
 
   local hyprland_pkg="hyprland"
@@ -811,9 +860,20 @@ install_packages() {
             btop
             xcb-util-cursor
         "
+    [toolchain]="
+            base-devel
+            rustup
+            rust
+            clang
+            llvm
+            cmake
+            pkg-config
+            curl
+            wget
+            unzip
+        "
     [build]="
             git
-            base-devel
             glib2
             uv
             sudo-rs
@@ -839,11 +899,12 @@ install_packages() {
 
   # Display packages grouped by manager and category
   echo -e "  ${CYAN}${BOLD}pacman packages${NC}"
-  for category in core daemons ui utils build; do
+  for category in core daemons ui utils toolchain build; do
     category_name="${category^}"
     [ "$category" = "daemons" ] && category_name="Daemons"
     [ "$category" = "ui" ] && category_name="UI Components"
     [ "$category" = "utils" ] && category_name="Utilities"
+    [ "$category" = "toolchain" ] && category_name="Toolchain (Rust/C++)"
     [ "$category" = "build" ] && category_name="Build & Toolchain"
     echo -e "    ${YELLOW}${BOLD}${category_name}:${NC}"
     for pkg in ${pacman_package_groups[$category]}; do
@@ -860,12 +921,16 @@ install_packages() {
   done
 
   echo ""
-  read -p "Install Aurora packages? (y/n) " -n 1 -r
-  echo
+  if [ "$INTERACTIVE" = true ]; then
+    read -p "Install Aurora packages? (y/n) " -n 1 -r
+    echo
 
-  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    print_warning "Skipping package installation"
-    return
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+      print_warning "Skipping package installation"
+      return
+    fi
+  else
+    print_warning "Non-interactive mode: automatically installing Aurora packages..."
   fi
 
   print_warning "Updating Arch Linux package databases and installed packages..."
@@ -881,7 +946,7 @@ install_packages() {
   local total_packages=0
 
   # Install pacman packages
-  for category in core daemons ui utils build; do
+  for category in core daemons ui utils toolchain build; do
     for package in ${pacman_package_groups[$category]}; do
       ((++total_packages))
 
@@ -1058,9 +1123,93 @@ EOF
   log_info "Configured SDDM to use sddm-astronaut-theme with qtvirtualkeyboard and enabled sddm.service"
 }
 
+# Ensure Rust toolchain (rustup + cargo) and C/C++ toolchain are ready
+# Runs after install_packages (which installs rustup/rust/clang/base-devel),
+# but before any `cargo install` / `cargo build` step. Idempotent.
+ensure_rust_toolchain() {
+  next_step "Ensuring Rust and C/C++ toolchains"
+
+  if [ "$DRY_RUN" = true ]; then
+    print_warning "[DRY RUN] Would ensure rustup toolchain (stable) and verify cargo/rustc/cc/c++/make/clang"
+    return 0
+  fi
+
+  # ~/.cargo/bin FIRST: this export must precede every cargo/rustup/rustc
+  # call in this function, otherwise a rustup-installed cargo is invisible.
+  ensure_cargo_bin_in_path
+
+  # If cargo is still missing, the pacman packages did not provide it
+  # (e.g. user skipped package installation). Install the Arch packages now.
+  if ! command -v cargo &>/dev/null || ! command -v rustup &>/dev/null; then
+    print_warning "Rust toolchain missing - installing rustup + rust via pacman (requires sudo)..."
+    log_info "Installing missing Rust toolchain packages via pacman"
+    sudo pacman -S rustup rust --noconfirm --needed || {
+      print_error "Failed to install rustup/rust via pacman"
+      rollback_on_failure "Rust toolchain installation failed"
+      return 1
+    }
+    ensure_cargo_bin_in_path
+  fi
+
+  # Install (or repair) the stable toolchain via rustup so `cargo` always works,
+  # even if the user has no default toolchain yet. This is a no-op if stable
+  # is already installed.
+  if command -v rustup &>/dev/null; then
+    log_info "Ensuring rustup stable toolchain is installed"
+    if ! rustup toolchain list 2>/dev/null | grep -q '^stable'; then
+      print_warning "Installing stable Rust toolchain via rustup (this may take a few minutes)..."
+    fi
+    rustup toolchain install stable --profile minimal --no-self-update 2>/dev/null || rustup toolchain install stable || {
+      print_error "Failed to install stable Rust toolchain via rustup"
+      rollback_on_failure "rustup stable toolchain installation failed"
+      return 1
+    }
+    rustup default stable 2>/dev/null || true
+    ensure_cargo_bin_in_path
+  fi
+
+  # Final verification: cargo + rustc must exist.
+  if ! command -v cargo &>/dev/null; then
+    print_error "cargo is still missing after toolchain setup"
+    rollback_on_failure "cargo not available"
+    return 1
+  fi
+  if ! command -v rustc &>/dev/null; then
+    print_error "rustc is still missing after toolchain setup"
+    rollback_on_failure "rustc not available"
+    return 1
+  fi
+  log_info "Rust toolchain ready: $(cargo --version 2>/dev/null || echo cargo) / $(rustc --version 2>/dev/null || echo rustc)"
+
+  # Verify C/C++ toolchain pieces needed to compile Rust crates (cc, bindgen...).
+  local missing_cc=()
+  command -v cc &>/dev/null || missing_cc+=("cc (base-devel/gcc)")
+  command -v c++ &>/dev/null || missing_cc+=("c++ (base-devel/gcc)")
+  command -v make &>/dev/null || missing_cc+=("make (base-devel)")
+  command -v clang &>/dev/null || missing_cc+=("clang")
+  command -v pkg-config &>/dev/null || command -v pkgconf &>/dev/null || missing_cc+=("pkg-config")
+
+  if [ ${#missing_cc[@]} -gt 0 ]; then
+    print_warning "C/C++ toolchain pieces missing (${missing_cc[*]}) - installing base-devel/clang/cmake/pkg-config (requires sudo)..."
+    log_info "Installing missing C/C++ toolchain packages via pacman"
+    sudo pacman -S base-devel clang llvm cmake pkg-config --noconfirm --needed || {
+      print_error "Failed to install C/C++ toolchain via pacman"
+      rollback_on_failure "C/C++ toolchain installation failed"
+      return 1
+    }
+    hash -r 2>/dev/null || true
+  fi
+
+  log_info "C/C++ toolchain ready: cc=$(command -v cc || echo missing) c++=$(command -v c++ || echo missing) clang=$(command -v clang || echo missing) make=$(command -v make || echo missing)"
+  print_success "Rust and C/C++ toolchains ready (cargo, rustup, base-devel, clang)"
+}
+
 # Build Rust scripts
 build_rust_scripts() {
   next_step "Building and installing Rust scripts"
+
+  # Guarantee cargo/rustup/cc exist even if install_packages was skipped.
+  ensure_rust_toolchain
 
   local script_dir="$SCRIPT_DIR/dotfiles/.config/hypr/scripts"
   local old_pwd="$PWD"
@@ -1119,6 +1268,11 @@ build_rust_scripts() {
 install_rust_packages() {
   next_step "Installing Rust packages"
 
+  # Guarantee cargo exists even if build_rust_scripts was skipped/failed earlier.
+  if [ "$DRY_RUN" = false ]; then
+    ensure_rust_toolchain
+  fi
+
   if ! command -v cargo &>/dev/null; then
     print_error "cargo is required to install Rust packages"
     echo "  Install Rust/Cargo first, then rerun the installer."
@@ -1176,6 +1330,11 @@ install_rust_packages() {
 
 install_waytrogen_aurora() {
   next_step "Installing waytrogen-aurora"
+
+  # Needs cargo + C toolchain (meson/cmake/pkg-config/glib2 via install_packages).
+  if [ "$DRY_RUN" = false ]; then
+    ensure_rust_toolchain
+  fi
 
   local repo_url="https://github.com/TheAhumMaitra/waytrogen-aurora.git"
   local repo_dir="$HOME/.local/share/Aurora/src/waytrogen-aurora"
@@ -1320,9 +1479,60 @@ copy_dotfiles() {
   print_success "Configuration files installed successfully"
 }
 
+# Ensure ~/.cargo/bin is on PATH for this installer process AND persisted
+# for future login shells. Idempotent - never adds duplicates.
+# Call it before ANY cargo/rustc use.
+ensure_cargo_bin_in_path() {
+  # 1) Current process: export immediately so `cargo install` etc. just work.
+  # Always applied - even in DRY_RUN - because exporting PATH has no
+  # persistent side effect and keeps dry-run tool detection accurate.
+  if ! cargo_bin_in_path; then
+    export PATH="$HOME/.cargo/bin:$PATH"
+    hash -r 2>/dev/null || true
+    log_info "Added ~/.cargo/bin to PATH for this installer process"
+  fi
+
+  if [ "${DRY_RUN:-false}" = true ]; then
+    log_debug "[DRY RUN] Would persist ~/.cargo/bin to ~/.profile, ~/.zprofile, rc files"
+    return 0
+  fi
+
+  # 2) Future shells: persist via ~/.profile (POSIX login shells: bash, sh,
+  # dash) and ~/.zprofile (zsh login shells). This covers display managers
+  # (SDDM/GDM), terminals, and non-interactive ssh - unlike ~/.bashrc which
+  # only affects interactive bash. The case-guard keeps it duplicate-free.
+  local profile_line='case ":$PATH:" in *":$HOME/.cargo/bin:"*) ;; *) export PATH="$HOME/.cargo/bin:$PATH" ;; esac'
+  local profile_file
+  for profile_file in "$HOME/.profile" "$HOME/.zprofile"; do
+    if [ ! -f "$profile_file" ]; then
+      {
+        echo ""
+        echo "# Aurora binaries (~/.cargo/bin on PATH)"
+        echo "$profile_line"
+      } >"$profile_file"
+      log_command "Created $profile_file with cargo bin PATH"
+    elif ! grep -qF 'export PATH="$HOME/.cargo/bin:$PATH"' "$profile_file"; then
+      {
+        echo ""
+        echo "# Aurora binaries (~/.cargo/bin on PATH)"
+        echo "$profile_line"
+      } >>"$profile_file"
+      log_command "Updated $profile_file with cargo bin PATH"
+    fi
+  done
+}
+
 # Set up shell configuration
 setup_shell_config() {
   next_step "Setting up shell configuration"
+
+  if [ "$DRY_RUN" = true ]; then
+    print_warning "[DRY RUN] Would export ~/.cargo/bin to PATH and persist it to ~/.profile, ~/.zprofile, ~/.bashrc, ~/.zshrc, fish config"
+    return 0
+  fi
+
+  # Make cargo bin available NOW (installer process) + persist for logins.
+  ensure_cargo_bin_in_path
 
   # Add ~/.cargo/bin to PATH if not already there
   local add_to_path="export PATH=\"\$HOME/.cargo/bin:\$PATH\""
@@ -1331,44 +1541,56 @@ setup_shell_config() {
   shell_name="$(basename "${SHELL:-}")"
 
   if ! cargo_bin_in_path; then
+    # Should never happen - ensure_cargo_bin_in_path exports above - but keep
+    # the flag semantics in case PATH was reset.
     path_was_missing=true
   fi
 
-  # For bash
-  if [ -f ~/.bashrc ]; then
-    if ! grep -q "\.cargo/bin" ~/.bashrc; then
-      echo "" >>~/.bashrc
-      echo "# Aurora binaries" >>~/.bashrc
-      echo "$add_to_path" >>~/.bashrc
-      print_success "Updated .bashrc"
-      log_command "Updated .bashrc with PATH"
-    fi
+  # For bash - create the file if missing so PATH is guaranteed set.
+  touch ~/.bashrc
+  if ! grep -q "\.cargo/bin" ~/.bashrc; then
+    echo "" >>~/.bashrc
+    echo "# Aurora binaries" >>~/.bashrc
+    echo "$add_to_path" >>~/.bashrc
+    print_success "Updated .bashrc"
+    log_command "Updated .bashrc with PATH"
+  else
+    log_debug ".bashrc already contains .cargo/bin"
   fi
 
-  # For zsh
-  if [ -f ~/.zshrc ]; then
-    if ! grep -q "\.cargo/bin" ~/.zshrc; then
-      echo "" >>~/.zshrc
-      echo "# Aurora binaries" >>~/.zshrc
-      echo "$add_to_path" >>~/.zshrc
-      print_success "Updated .zshrc"
-      log_command "Updated .zshrc with PATH"
-    fi
+  # For zsh - create the file if missing so PATH is guaranteed set.
+  touch ~/.zshrc
+  if ! grep -q "\.cargo/bin" ~/.zshrc; then
+    echo "" >>~/.zshrc
+    echo "# Aurora binaries" >>~/.zshrc
+    echo "$add_to_path" >>~/.zshrc
+    print_success "Updated .zshrc"
+    log_command "Updated .zshrc with PATH"
+  else
+    log_debug ".zshrc already contains .cargo/bin"
   fi
 
-  # For fish
-  if [ -f ~/.config/fish/config.fish ]; then
-    if ! grep -q "\.cargo/bin" ~/.config/fish/config.fish; then
-      echo "" >>~/.config/fish/config.fish
-      echo "# Aurora binaries" >>~/.config/fish/config.fish
-      echo "set -gx PATH \$HOME/.cargo/bin \$PATH" >>~/.config/fish/config.fish
-      print_success "Updated fish config"
-      log_command "Updated fish config.fish with PATH"
-    fi
+  # For fish - create config if missing, use fish-native PATH syntax.
+  mkdir -p ~/.config/fish
+  touch ~/.config/fish/config.fish
+  if ! grep -q "\.cargo/bin" ~/.config/fish/config.fish; then
+    echo "" >>~/.config/fish/config.fish
+    echo "# Aurora binaries" >>~/.config/fish/config.fish
+    echo 'fish_add_path $HOME/.cargo/bin' >>~/.config/fish/config.fish
+    print_success "Updated fish config"
+    log_command "Updated fish config.fish with PATH"
+  else
+    log_debug "fish config already contains .cargo/bin"
+  fi
+
+  # Belt-and-suspenders: current process must have it (verify, don't assume).
+  if ! cargo_bin_in_path; then
+    export PATH="$HOME/.cargo/bin:$PATH"
+    hash -r 2>/dev/null || true
+    path_was_missing=true
   fi
 
   if [ "$path_was_missing" = true ]; then
-    export PATH="$HOME/.cargo/bin:$PATH"
     print_warning "Aurora binaries were added to shell config, but your current terminal may need to reload PATH."
     case "$shell_name" in
     fish)
@@ -1390,6 +1612,10 @@ setup_shell_config() {
 
 verify_installation() {
   next_step "Verifying installation"
+
+  # PATH must be set before checking `command -v <bin>`: re-assert it here
+  # (covers the case where the shell reordered steps or PATH was reset).
+  ensure_cargo_bin_in_path
 
   local cargo_bin="$HOME/.cargo/bin"
   local script_dir="$SCRIPT_DIR/dotfiles/.config/hypr/scripts"
@@ -1743,7 +1969,7 @@ Options:
   --help              Show this help message
   --dry-run           Preview changes without applying them
   --uninstall         Uninstall Aurora and restore backups
-  --non-interactive   Run without user prompts (skip packages & Hyprland check)
+  --non-interactive   Run without user prompts (auto-install packages, incl. toolchain)
   --debug             Show detailed debug information and logs
 
 Examples:
@@ -1791,6 +2017,12 @@ main() {
   prepare_install_log
   initialize_logging
 
+  # ~/.cargo/bin must be on PATH before ANY tool detection (cargo/rustup in
+  # check_dependencies, install_packages, etc.). Export + persist early so
+  # both the installer process and all future shells see Aurora binaries.
+  # Uses only logging helpers (safe before banner/steps).
+  ensure_cargo_bin_in_path
+
   log_info "Aurora Installation Started"
   log_debug "Script location: $SCRIPT_DIR"
   log_debug "Interactive mode: $INTERACTIVE"
@@ -1820,17 +2052,29 @@ main() {
 
   if [ "$DRY_RUN" = false ]; then
     install_sddm_theme
+    # Configs MUST be moved before compiling the scripts folder: the Rust
+    # scripts embed/validate config paths at build time, so building first
+    # leaves them pointing at stale/missing config locations.
+    copy_dotfiles
+    setup_shell_config
     build_rust_scripts
     install_rust_packages
     install_waytrogen_aurora
     setup_lazyvim
-    copy_dotfiles
-    setup_shell_config
     verify_installation
     apply_default_theme
   else
     next_step "Installing SDDM astronaut theme"
     print_warning "[DRY RUN] Would clone/configure the SDDM astronaut theme and install fonts"
+
+    next_step "Installing configuration files"
+    print_warning "[DRY RUN] Would copy configuration files"
+
+    next_step "Setting up shell configuration"
+    print_warning "[DRY RUN] Would update shell PATH"
+
+    next_step "Ensuring Rust and C/C++ toolchains"
+    print_warning "[DRY RUN] Would ensure rustup/cargo/base-devel/clang are installed"
 
     next_step "Building and installing Rust scripts"
     print_warning "[DRY RUN] Would build and install Rust scripts"
@@ -1842,12 +2086,6 @@ main() {
 
     next_step "Installing LazyVim starter"
     print_warning "[DRY RUN] Would backup Neovim files and install LazyVim starter"
-
-    next_step "Installing configuration files"
-    print_warning "[DRY RUN] Would copy configuration files"
-
-    next_step "Setting up shell configuration"
-    print_warning "[DRY RUN] Would update shell PATH"
 
     next_step "Verifying installation"
     print_warning "[DRY RUN] Would verify installed binaries and PATH"
