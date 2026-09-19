@@ -21,116 +21,24 @@
 
 set -Eeuo pipefail
 
-# Colors for output — minimal, TTY-safe (real ESC via $'', 8-color fallback on linux console)
-if [ -n "${NO_COLOR:-}" ] || [ "${TERM:-dumb}" = "dumb" ] || ! [ -t 1 ]; then
-  RESET=''
-  RED=''
-  GREEN=''
-  YELLOW=''
-  BLUE=''
-  MAGENTA=''
-  CYAN=''
-  WHITE=''
-  DARK=''
-  BOLD=''
-  DIM=''
-  NC=''
-elif [ "${TERM:-}" = "linux" ] || [ "$(tput colors 2>/dev/null || echo 8)" -lt 16 ]; then
-  # Arch TTY (linux console): only 8 basic colors, no 256/truecolor, no bright-white 97, no OSC.
-  RESET=$'\e[0m'
-  RED=$'\e[1;31m'
-  GREEN=$'\e[1;32m'
-  YELLOW=$'\e[1;33m'
-  BLUE=$'\e[1;34m'
-  MAGENTA=$'\e[1;35m'
-  CYAN=$'\e[1;36m'
-  WHITE=$'\e[1;37m'
-  DARK=$'\e[0m'
-  BOLD=$'\e[1m'
-  DIM=$'\e[2m'
-  NC="$RESET"
-else
-  RESET=$'\e[0m'
-  RED=$'\e[1;38;5;203m'
-  GREEN=$'\e[1;38;5;120m'
-  YELLOW=$'\e[1;38;5;221m'
-  BLUE=$'\e[1;38;5;111m'
-  MAGENTA=$'\e[1;38;5;213m'
-  CYAN=$'\e[1;38;5;159m'
-  WHITE=$'\e[1;97m'
-  DARK=$'\e[38;5;244m'
-  BOLD=$'\e[1m'
-  DIM=$'\e[2m'
-  NC="$RESET"
-fi
-
-# ---- Aurora TUI: violet bg only where it can work ----
-# Disabled on: piped output, dumb/linux TTY, <16 colors, NO_COLOR=1.
-AURORA_TUI="${AURORA_TUI:-auto}"
-TUI_BG=''
-TUI_ACTIVE=false
-TUI_BG_TRUE=$'\e[48;2;26;10;54m'
-TUI_BG_256=$'\e[48;5;53m'
-TUI_STDOUT_IS_TTY=false
-
-tui_want() {
-  [ -z "${NO_COLOR:-}" ] || return 1
-  case "$AURORA_TUI" in
-  on) ;;
-  off) return 1 ;;
-  *) [ -t 1 ] || return 1 ;;
-  esac
-  [ "${TERM:-dumb}" = "dumb" ] && return 1
-  [ "${TERM:-}" = "linux" ] && return 1
-  [ "$(tput colors 2>/dev/null || echo 0)" -ge 16 ] || return 1
-  return 0
-}
-
-tui_pick_bg() {
-  case "${COLORTERM:-}" in
-  *truecolor* | *24bit*) printf '%s' "$TUI_BG_TRUE" ;;
-  *) printf '%s' "$TUI_BG_256" ;;
-  esac
-}
-
-tui_shutdown() {
-  if [ "$TUI_ACTIVE" = true ]; then
-    printf '\e[0m'
-    TUI_ACTIVE=false
-  fi
-}
-
-tui_init() {
-  if [ -t 1 ]; then
-    TUI_STDOUT_IS_TTY=true
-  else
-    TUI_STDOUT_IS_TTY=false
-  fi
-  tui_want || return 0
-  TUI_BG="$(tui_pick_bg)"
-  NC="${RESET}${TUI_BG}"
-  TUI_ACTIVE=true
-  printf '%s' "$TUI_BG"
-  # OSC-11 only on capable terminals, never on linux console.
-  if [ "${TERM:-}" != "linux" ]; then
-    printf '\e]11;rgb:1a/0a/36\e\\' >/dev/tty 2>/dev/null || true
-  fi
-  trap tui_shutdown EXIT
-  trap 'tui_shutdown; exit 130' INT TERM
-}
-
-tui_clear() {
-  if [ "$TUI_ACTIVE" = true ]; then
-    printf '%s\e[2J\e[H' "$TUI_BG"
-  else
-    command -v clear &>/dev/null && clear || true
-  fi
-}
+# Colors for output
+RESET='\033[0m'
+RED='\033[1;38;5;203m'
+GREEN='\033[1;38;5;120m'
+YELLOW='\033[1;38;5;221m'
+BLUE='\033[1;38;5;111m'
+MAGENTA='\033[1;38;5;213m'
+CYAN='\033[1;38;5;159m'
+WHITE='\033[1;97m'
+DARK='\033[38;5;244m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC="$RESET"
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_LOG="$HOME/.local/share/Aurora/install.log"
-BACKUP_DIR="$HOME/.local/share/Aurora/backups/aurora_backup_$(date +%s)"
+BACKUP_DIR="$HOME/.config/aurora_backup_$(date +%s)"
 INTERACTIVE=true
 DRY_RUN=false
 CURRENT_STEP=0
@@ -156,14 +64,6 @@ error_handler() {
 trap 'error_handler $LINENO' ERR
 
 # Structured Logging System
-# Console output may carry colors / the violet TUI background on a real TTY.
-# The log FILE always stays plain: console styling is stripped before writing.
-ui_strip() {
-  # ${NC} is RESET+BG on TUI, so a reset can be followed by the violet BG code.
-  # Also strip clear-screen/home-cursor and OSC-11 sequences from the log.
-  sed -e 's/\x1b\[[0-9;]*m//g' -e 's/\x1b\]11;[^\a]*\a//g' -e 's/\x1b\[2J//g' -e 's/\x1b\[H//g'
-}
-
 log_message() {
   local level="$1"
   shift
@@ -213,11 +113,7 @@ print_rule() {
 }
 
 print_spacer() {
-  if [ "$TUI_ACTIVE" = true ]; then
-    printf '%s\n' "$TUI_BG"
-  else
-    echo ""
-  fi
+  echo ""
 }
 
 render_banner() {
@@ -253,7 +149,7 @@ print_error() {
 }
 
 clear_screen() {
-  tui_clear
+  command -v clear &>/dev/null && clear || true
 }
 
 next_step() {
@@ -353,11 +249,8 @@ discover_cargo_binaries() {
 }
 
 initialize_logging() {
-  # Split-stream logging: the terminal keeps FULL color output (foreground
-  # colors + violet TUI background), while install.log gets a plain-text copy
-  # with all escape sequences stripped. tee writes the raw stream to the
-  # screen AND pipes a stripped copy to the log file.
-  exec > >(tee >(ui_strip >>"$INSTALL_LOG"))
+  # Stream all output to both console and log file.
+  exec > >(tee -a "$INSTALL_LOG")
   exec 2>&1
 }
 
@@ -594,31 +487,21 @@ install_aur_helper() {
     return 0
   fi
 
-  clear_stale_pacman_lock || wait_for_pacman_settle || true
-
   # Check for base-devel before attempting to build
   if ! pacman -Q base-devel &>/dev/null; then
     print_warning "base-devel is required to build yay from source"
-    if [ "$INTERACTIVE" = false ]; then
-      print_warning "Non-interactive mode: automatically installing base-devel..."
-      sudo pacman -S base-devel --noconfirm --needed || {
-        print_error "Failed to install base-devel"
-        return 1
-      }
-    else
-      read -p "Install base-devel? (y/n) " -n 1 -r
-      echo
+    read -p "Install base-devel? (y/n) " -n 1 -r
+    echo
 
-      if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        print_error "Cannot proceed without base-devel"
-        return 1
-      fi
-
-      sudo pacman -S base-devel --noconfirm --needed || {
-        print_error "Failed to install base-devel"
-        return 1
-      }
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+      print_error "Cannot proceed without base-devel"
+      return 1
     fi
+
+    sudo pacman -S base-devel --noconfirm || {
+      print_error "Failed to install base-devel"
+      return 1
+    }
   fi
 
   print_warning "AUR helper 'yay' not found. Installing..."
@@ -687,21 +570,64 @@ prepare_install_log() {
   : >"$INSTALL_LOG"
 }
 
+copy_hypr_children_without_user() {
+  local src_hypr="$1"
+  local dest_hypr="$2"
+  local item
+  local item_name
+
+  [ -d "$src_hypr" ] || return 0
+  mkdir -p "$dest_hypr"
+
+  while IFS= read -r -d '' item; do
+    item_name="${item##*/}"
+    [ "$item_name" = "User" ] && continue
+    cp -rfv "$item" "$dest_hypr/"
+  done < <(find "$src_hypr" -mindepth 1 -maxdepth 1 -print0)
+}
+
+backup_hypr_without_user() {
+  local target_hypr="$1"
+  local backup_hypr="$2"
+  local item
+  local item_name
+
+  [ -d "$target_hypr" ] || return 0
+  mkdir -p "$backup_hypr"
+
+  while IFS= read -r -d '' item; do
+    item_name="${item##*/}"
+    [ "$item_name" = "User" ] && continue
+    cp -r "$item" "$backup_hypr/"
+  done < <(find "$target_hypr" -mindepth 1 -maxdepth 1 -print0)
+}
+
+remove_hypr_children_without_user() {
+  local target_hypr="$1"
+  local item
+  local item_name
+
+  [ -d "$target_hypr" ] || return 0
+
+  while IFS= read -r -d '' item; do
+    item_name="${item##*/}"
+    [ "$item_name" = "User" ] && continue
+    rm -rf "$item"
+  done < <(find "$target_hypr" -mindepth 1 -maxdepth 1 -print0)
+}
+
 restore_config_from_backup() {
   local config_name="$1"
   local backup_root="$2"
   local backup_item="$backup_root/$config_name"
   local target_item="$HOME/.config/$config_name"
-  local exclude_name
 
   [ -d "$backup_item" ] || return 0
 
-  exclude_name="$(preserve_child_for "$config_name")"
-
-  if [ -n "$exclude_name" ]; then
+  if [ "$config_name" = "hypr" ]; then
     mkdir -p "$target_item"
-    remove_children_without "$target_item" "$exclude_name"
-    copy_children_without "$backup_item" "$target_item" "$exclude_name"
+    remove_hypr_children_without_user "$target_item"
+    copy_hypr_children_without_user "$backup_item" "$target_item"
     return 0
   fi
 
@@ -724,7 +650,7 @@ rollback_on_failure() {
     echo
 
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-      for config_dir in hypr aurora waybar kitty fish rofi; do
+      for config_dir in hypr waybar kitty fish rofi; do
         restore_config_from_backup "$config_dir" "$BACKUP_DIR"
       done
       print_success "Configs restored from backup"
@@ -737,79 +663,36 @@ rollback_on_failure() {
 }
 
 # Check dependencies
-# NOTE: cargo / rustup / clang / base-devel are installed automatically by
-# install_packages + ensure_rust_toolchain later in the flow, so this check
-# only hard-requires git (needed immediately). Everything else is reported
-# here and then installed automatically - it never aborts the install.
 check_dependencies() {
   next_step "Checking system dependencies"
 
-  # git is needed right away (AUR helper, lazyvim, etc.). Try to install it
-  # automatically instead of aborting.
-  if ! command -v git &>/dev/null; then
-    print_warning "git not found - attempting to install it automatically..."
-    if command -v pacman &>/dev/null; then
-      sudo pacman -S git --noconfirm --needed || {
-        print_error "Failed to install git automatically. Install with: sudo pacman -S git"
-        exit 1
-      }
-    else
-      print_error "Missing required dependency: git"
-      exit 1
-    fi
-  fi
+  local missing_deps=()
 
-  local will_install=()
-
+  # Check for cargo
   if ! command -v cargo &>/dev/null; then
-    will_install+=("cargo (via rust + rustup packages)")
+    missing_deps+=("cargo (Rust package manager)")
   fi
-  if ! command -v rustup &>/dev/null; then
-    will_install+=("rustup (Rust toolchain manager)")
+
+  # Check for git
+  if ! command -v git &>/dev/null; then
+    missing_deps+=("git")
   fi
-  if ! pacman -Q base-devel &>/dev/null && ! command -v make &>/dev/null; then
-    will_install+=("base-devel (gcc, make, pkg-config, autoconf, ...)")
-  fi
-  if ! command -v clang &>/dev/null; then
-    will_install+=("clang (C/C++ frontend for Rust crates like bindgen/cc)")
-  fi
-  if ! command -v cc &>/dev/null; then
-    will_install+=("cc (via base-devel/gcc)")
-  fi
-  if ! command -v c++ &>/dev/null; then
-    will_install+=("c++ (via base-devel/gcc)")
-  fi
+
+  # Check for make
   if ! command -v make &>/dev/null; then
-    will_install+=("make (via base-devel)")
-  fi
-  if ! command -v cmake &>/dev/null; then
-    will_install+=("cmake")
-  fi
-  if ! command -v pkg-config &>/dev/null && ! command -v pkgconf &>/dev/null; then
-    will_install+=("pkg-config")
-  fi
-  if ! command -v curl &>/dev/null; then
-    will_install+=("curl (needed for rustup)")
+    missing_deps+=("make")
   fi
 
-  if [ ${#will_install[@]} -gt 0 ]; then
-    # De-duplicate while preserving order
-    local uniq=()
-    local seen=" "
-    local item
-    for item in "${will_install[@]}"; do
-      if [[ "$seen" != *" | $item | "* ]]; then
-        uniq+=("$item")
-        seen+="| $item | "
-      fi
-    done
-    print_warning "The following toolchain components are missing and will be installed automatically:"
-    printf '%s\n' "${uniq[@]}" | sed 's/^/  - /'
+  if [ ${#missing_deps[@]} -gt 0 ]; then
+    print_error "Missing required dependencies:"
+    printf '%s\n' "${missing_deps[@]}" | sed 's/^/  - /'
     echo ""
-    log_info "Missing toolchain components will be installed: ${uniq[*]}"
+    print_warning "Install with: sudo pacman -S rustup git base-devel"
+    echo ""
+    exit 1
   fi
 
-  print_success "Dependency check passed (missing toolchain will be auto-installed)"
+  print_success "All required dependencies found"
 }
 
 # Validate Hyprland setup
@@ -864,7 +747,9 @@ install_packages() {
   fi
 
   if [ "$INTERACTIVE" = false ]; then
-    print_warning "Running in non-interactive mode - installing packages without prompting"
+    print_warning "Running in non-interactive mode - skipping package installation"
+    print_warning "Install packages manually with: pacman -S <package>"
+    return
   fi
 
   local hyprland_pkg="hyprland"
@@ -926,10 +811,12 @@ install_packages() {
             btop
             xcb-util-cursor
         "
-    [toolchain]="
+    [build]="
+            git
             base-devel
-            rustup
-            rust
+            glib2
+            uv
+            sudo-rs
             clang
             llvm
             cmake
@@ -937,12 +824,6 @@ install_packages() {
             curl
             wget
             unzip
-        "
-    [build]="
-            git
-            glib2
-            uv
-            sudo-rs
         "
   )
 
@@ -965,12 +846,11 @@ install_packages() {
 
   # Display packages grouped by manager and category
   echo -e "  ${CYAN}${BOLD}pacman packages${NC}"
-  for category in core daemons ui utils toolchain build; do
+  for category in core daemons ui utils build; do
     category_name="${category^}"
     [ "$category" = "daemons" ] && category_name="Daemons"
     [ "$category" = "ui" ] && category_name="UI Components"
     [ "$category" = "utils" ] && category_name="Utilities"
-    [ "$category" = "toolchain" ] && category_name="Toolchain (Rust/C++)"
     [ "$category" = "build" ] && category_name="Build & Toolchain"
     echo -e "    ${YELLOW}${BOLD}${category_name}:${NC}"
     for pkg in ${pacman_package_groups[$category]}; do
@@ -987,16 +867,12 @@ install_packages() {
   done
 
   echo ""
-  if [ "$INTERACTIVE" = true ]; then
-    read -p "Install Aurora packages? (y/n) " -n 1 -r
-    echo
+  read -p "Install Aurora packages? (y/n) " -n 1 -r
+  echo
 
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-      print_warning "Skipping package installation"
-      return
-    fi
-  else
-    print_warning "Non-interactive mode: automatically installing Aurora packages..."
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    print_warning "Skipping package installation"
+    return
   fi
 
   print_warning "Updating Arch Linux package databases and installed packages..."
@@ -1007,66 +883,33 @@ install_packages() {
 
   print_warning "Installing Aurora dependencies (requires sudo)..."
 
-  # pacman serializes every transaction with /var/lib/pacman/db.lck. A stale
-  # lock left behind by a killed process (or a package manager running right
-  # now) makes every following pacman call fail with "unable to lock database".
-  # Clear a leftover lock up front, then run ONE transaction for all packages:
-  # the lock is taken once instead of once per package.
-  if ! clear_stale_pacman_lock; then
-    print_warning "A package manager is already running; waiting for it to release the pacman database lock..."
-    wait_for_pacman_settle || print_warning "Timed out waiting for the running package manager"
-  fi
-
   local failed_packages=()
   local installed_count=0
   local total_packages=0
-  local -a pacman_to_install=()
-  local -a install_list=()
-  local category package item seen
 
-  # Gather every missing pacman package into one flat, de-duplicated list.
-  for category in core daemons ui utils toolchain build; do
+  # Install pacman packages
+  for category in core daemons ui utils build; do
     for package in ${pacman_package_groups[$category]}; do
       ((++total_packages))
+
       if pacman -Q "$package" &>/dev/null; then
         print_success "Package '$package' already installed"
       else
-        pacman_to_install+=("$package")
-      fi
-    done
-  done
-
-  seen=" "
-  for item in "${pacman_to_install[@]}"; do
-    if [[ "$seen" != *"|$item|"* ]]; then
-      install_list+=("$item")
-      seen+="|$item|"
-    fi
-  done
-
-  if [ ${#install_list[@]} -gt 0 ]; then
-    log_info "Installing ${#install_list[@]} packages in a single pacman transaction"
-    if ! sudo pacman -S --noconfirm --needed "${install_list[@]}"; then
-      print_warning "The pacman transaction reported a failure; retrying individually to isolate bad packages"
-      log_warn "pacman batch install failed; falling back to per-package installs"
-      for package in "${install_list[@]}"; do
-        if ! pacman -Q "$package" &>/dev/null; then
-          sudo pacman -S "$package" --noconfirm --needed || true
+        if sudo pacman -S "$package" --noconfirm --needed 2>/dev/null; then
+          ((++installed_count))
+          log_command "Installed: $package"
+        else
+          failed_packages+=("$package")
+          log_command "Failed to install: $package"
         fi
-      done
-    fi
-
-    # Verify the end state per package; with --needed every still-missing name
-    # is a genuine failure.
-    for package in "${install_list[@]}"; do
-      if pacman -Q "$package" &>/dev/null; then
-        ((++installed_count))
-        log_command "Installed: $package"
-      else
-        failed_packages+=("$package")
-        log_command "Failed to install: $package"
       fi
     done
+  done
+
+  if [ ${#failed_packages[@]} -gt 0 ]; then
+    print_warning "Some pacman packages failed (${#failed_packages[@]}/${total_packages}):"
+    printf '%s\n' "${failed_packages[@]}" | sed 's/^/  - /'
+    echo ""
   fi
 
   # Ensure yay exists for AUR package installation.
@@ -1078,45 +921,23 @@ install_packages() {
   fi
 
   if command -v yay &>/dev/null; then
-    local -a aur_to_install=()
     for category in aur_extras; do
       for package in ${yay_package_groups[$category]}; do
         ((++total_packages))
         if pacman -Q "$package" &>/dev/null; then
           print_success "AUR package '$package' already installed"
         else
-          aur_to_install+=("$package")
+          if yay -S "$package" --noconfirm --needed 2>/dev/null; then
+            ((++installed_count))
+            log_command "Installed AUR package: $package"
+          else
+            print_warning "Failed to install AUR package: $package"
+          fi
         fi
       done
     done
-
-    if [ ${#aur_to_install[@]} -gt 0 ]; then
-      # One yay transaction (yay passes --needed through to pacman), so the
-      # pacman database lock is only taken once for all AUR packages too.
-      log_info "Installing ${#aur_to_install[@]} AUR packages in a single yay transaction"
-      if ! yay -S --noconfirm --needed "${aur_to_install[@]}"; then
-        print_warning "The yay transaction reported a failure; verifying which packages installed"
-        log_warn "yay batch install failed; remaining missing packages are reported below"
-      fi
-
-      for package in "${aur_to_install[@]}"; do
-        if pacman -Q "$package" &>/dev/null; then
-          ((++installed_count))
-          log_command "Installed AUR package: $package"
-        else
-          failed_packages+=("$package")
-          log_command "Failed to install AUR package: $package"
-        fi
-      done
-    fi
   else
     print_warning "Skipping AUR packages because yay is unavailable"
-  fi
-
-  if [ ${#failed_packages[@]} -gt 0 ]; then
-    print_warning "Some packages failed (${#failed_packages[@]}/${total_packages}):"
-    printf '%s\n' "${failed_packages[@]}" | sed 's/^/  - /'
-    echo ""
   fi
 
   print_success "Package installation completed ($installed_count/$total_packages packages installed/updated)"
@@ -1244,101 +1065,31 @@ EOF
   log_info "Configured SDDM to use sddm-astronaut-theme with qtvirtualkeyboard and enabled sddm.service"
 }
 
-# Ensure Rust toolchain (rustup + cargo) and C/C++ toolchain are ready
-# Runs after install_packages (which installs rustup/rust/clang/base-devel),
-# but before any `cargo install` / `cargo build` step. Idempotent.
-ensure_rust_toolchain() {
-  next_step "Ensuring Rust and C/C++ toolchains"
-
-  if [ "$DRY_RUN" = true ]; then
-    print_warning "[DRY RUN] Would ensure rustup toolchain (stable) and verify cargo/rustc/cc/c++/make/clang"
-    return 0
-  fi
-
-  # ~/.cargo/bin FIRST: this export must precede every cargo/rustup/rustc
-  # call in this function, otherwise a rustup-installed cargo is invisible.
-  ensure_cargo_bin_in_path
-
-  # If cargo is still missing, the pacman packages did not provide it
-  # (e.g. user skipped package installation). Install the Arch packages now.
-  if ! command -v cargo &>/dev/null || ! command -v rustup &>/dev/null; then
-    print_warning "Rust toolchain missing - installing rustup + rust via pacman (requires sudo)..."
-    log_info "Installing missing Rust toolchain packages via pacman"
-    sudo pacman -S rustup rust --noconfirm --needed || {
-      print_error "Failed to install rustup/rust via pacman"
-      rollback_on_failure "Rust toolchain installation failed"
-      return 1
-    }
-    ensure_cargo_bin_in_path
-  fi
-
-  # Install (or repair) the stable toolchain via rustup so `cargo` always works,
-  # even if the user has no default toolchain yet. This is a no-op if stable
-  # is already installed.
-  if command -v rustup &>/dev/null; then
-    log_info "Ensuring rustup stable toolchain is installed"
-    if ! rustup toolchain list 2>/dev/null | grep -q '^stable'; then
-      print_warning "Installing stable Rust toolchain via rustup (this may take a few minutes)..."
-    fi
-    rustup toolchain install stable --profile minimal --no-self-update 2>/dev/null || rustup toolchain install stable || {
-      print_error "Failed to install stable Rust toolchain via rustup"
-      rollback_on_failure "rustup stable toolchain installation failed"
-      return 1
-    }
-    rustup default stable 2>/dev/null || true
-    ensure_cargo_bin_in_path
-  fi
-
-  # Final verification: cargo + rustc must exist.
-  if ! command -v cargo &>/dev/null; then
-    print_error "cargo is still missing after toolchain setup"
-    rollback_on_failure "cargo not available"
-    return 1
-  fi
-  if ! command -v rustc &>/dev/null; then
-    print_error "rustc is still missing after toolchain setup"
-    rollback_on_failure "rustc not available"
-    return 1
-  fi
-  log_info "Rust toolchain ready: $(cargo --version 2>/dev/null || echo cargo) / $(rustc --version 2>/dev/null || echo rustc)"
-
-  # Verify C/C++ toolchain pieces needed to compile Rust crates (cc, bindgen...).
-  local missing_cc=()
-  command -v cc &>/dev/null || missing_cc+=("cc (base-devel/gcc)")
-  command -v c++ &>/dev/null || missing_cc+=("c++ (base-devel/gcc)")
-  command -v make &>/dev/null || missing_cc+=("make (base-devel)")
-  command -v clang &>/dev/null || missing_cc+=("clang")
-  command -v pkg-config &>/dev/null || command -v pkgconf &>/dev/null || missing_cc+=("pkg-config")
-
-  if [ ${#missing_cc[@]} -gt 0 ]; then
-    print_warning "C/C++ toolchain pieces missing (${missing_cc[*]}) - installing base-devel/clang/cmake/pkg-config (requires sudo)..."
-    log_info "Installing missing C/C++ toolchain packages via pacman"
-    sudo pacman -S base-devel clang llvm cmake pkg-config --noconfirm --needed || {
-      print_error "Failed to install C/C++ toolchain via pacman"
-      rollback_on_failure "C/C++ toolchain installation failed"
-      return 1
-    }
-    hash -r 2>/dev/null || true
-  fi
-
-  log_info "C/C++ toolchain ready: cc=$(command -v cc || echo missing) c++=$(command -v c++ || echo missing) clang=$(command -v clang || echo missing) make=$(command -v make || echo missing)"
-  print_success "Rust and C/C++ toolchains ready (cargo, rustup, base-devel, clang)"
-}
-
 # Build Rust scripts
 build_rust_scripts() {
   next_step "Building and installing Rust scripts"
 
-  # Guarantee cargo/rustup/cc exist even if install_packages was skipped.
-  ensure_rust_toolchain
+  local script_dir="$SCRIPT_DIR/dotfiles/.config/hypr/scripts"
+  local old_pwd="$PWD"
 
-  # The live copy: repo was already deployed to $HOME/.config by copy_dotfiles.
-  local script_dir="$HOME/.config/hypr/scripts"
+  if [ ! -d "$script_dir" ]; then
+    log_error "Scripts directory not found at $script_dir"
+    print_error "Scripts directory not found at $script_dir"
+    rollback_on_failure "Scripts directory missing"
+    return 1
+  fi
 
-  [ -f "$script_dir/Cargo.toml" ] || {
+  # Verify Cargo.toml exists (Issue #4 - project validation)
+  if [ ! -f "$script_dir/Cargo.toml" ]; then
     log_error "Cargo.toml not found in $script_dir - invalid Rust project"
     print_error "Invalid Rust project structure at $script_dir"
     rollback_on_failure "Invalid Rust project"
+    return 1
+  fi
+
+  cd "$script_dir" || {
+    log_error "Failed to change directory to $script_dir"
+    rollback_on_failure "Cannot access scripts directory"
     return 1
   }
 
@@ -1350,27 +1101,30 @@ build_rust_scripts() {
     log_info "Starting cargo install for Aurora scripts"
   fi
 
-  # Subshell: no cd/old_pwd dance, PWD always restored even on failure/return.
-  (
-    cd -- "$script_dir" || exit 1
-    exec cargo install --path . --locked
-  ) || {
-    print_error "Failed to build Rust scripts in $script_dir"
+  # Run cargo install with error capture (Issue #4 & #7)
+  local cargo_log="$INSTALL_LOG.cargo_err"
+  if ! cargo install --path . 2>"$cargo_log"; then
+    local cargo_error=$(cat "$cargo_log" 2>/dev/null | tail -20 || echo "Unknown error")
+    log_error "Cargo install failed: $cargo_error"
+    print_error "Failed to build Rust scripts"
+    print_warning "Last 20 lines of error log:"
+    echo "$cargo_error" | sed 's/^/  /'
+    rm -f "$cargo_log"
     rollback_on_failure "Cargo build failed"
+    cd "$old_pwd" || true
     return 1
-  }
+  fi
 
+  rm -f "$cargo_log"
   log_info "Successfully installed Rust scripts to ~/.cargo/bin"
   print_success "Rust scripts installed successfully to ~/.cargo/bin"
+
+  cd "$old_pwd" || true
+  return 0
 }
 
 install_rust_packages() {
   next_step "Installing Rust packages"
-
-  # Guarantee cargo exists even if build_rust_scripts was skipped/failed earlier.
-  if [ "$DRY_RUN" = false ]; then
-    ensure_rust_toolchain
-  fi
 
   if ! command -v cargo &>/dev/null; then
     print_error "cargo is required to install Rust packages"
@@ -1429,11 +1183,6 @@ install_rust_packages() {
 
 install_waytrogen_aurora() {
   next_step "Installing waytrogen-aurora"
-
-  # Needs cargo + C toolchain (meson/cmake/pkg-config/glib2 via install_packages).
-  if [ "$DRY_RUN" = false ]; then
-    ensure_rust_toolchain
-  fi
 
   local repo_url="https://github.com/TheAhumMaitra/waytrogen-aurora.git"
   local repo_dir="$HOME/.local/share/Aurora/src/waytrogen-aurora"
@@ -1526,40 +1275,33 @@ copy_dotfiles() {
   local config_dir
   local config_name
   local target_item
-  local exclude_name
 
-  [ -d "$config_src" ] || {
+  if [ ! -d "$config_src" ]; then
     print_error "Dotfiles directory not found at $config_src"
-    return 1
-  }
+    exit 1
+  fi
+
   mkdir -p "$config_dest"
 
   if [ "$DRY_RUN" = true ]; then
     print_warning "[DRY RUN] Would backup existing Aurora configs to $BACKUP_DIR"
-    print_warning "[DRY RUN] Would remove existing Aurora config files and directories, preserving ~/.config/hypr/User, ~/.config/aurora.toml and ~/.config/aurora/palette.toml"
+    print_warning "[DRY RUN] Would remove existing Aurora config files and directories, preserving ~/.config/hypr/User"
     print_warning "[DRY RUN] Would copy config files from $config_src to $config_dest"
-    return 0
+    return
   fi
 
   print_warning "Forcefully replacing existing Aurora configs..."
   mkdir -p "$BACKUP_DIR"
 
-  # Phase 1 - back up the existing configs (skipping personal files such as
-  # hypr/User and aurora/palette.toml that must survive the copy), then wipe.
   while IFS= read -r -d '' config_dir; do
     config_name="${config_dir##*/}"
     target_item="$config_dest/$config_name"
 
-    # Top-level personal file managed by the aurora tool: never touch it.
-    [ "$config_name" = "aurora.toml" ] && continue
-
-    exclude_name="$(preserve_child_for "$config_name")"
-
-    if [ -n "$exclude_name" ]; then
+    if [ "$config_name" = "hypr" ]; then
       rm -rf "$BACKUP_DIR/$config_name"
-      backup_children_without "$target_item" "$BACKUP_DIR/$config_name" "$exclude_name"
+      backup_hypr_without_user "$target_item" "$BACKUP_DIR/$config_name"
       mkdir -p "$target_item"
-      remove_children_without "$target_item" "$exclude_name"
+      remove_hypr_children_without_user "$target_item"
       continue
     fi
 
@@ -1570,18 +1312,11 @@ copy_dotfiles() {
     fi
   done < <(find "$config_src" -mindepth 1 -maxdepth 1 -print0)
 
-  # Phase 2 - copy fresh configs. hypr/User and aurora/palette.toml are
-  # preserved: an existing copy wins over the shipped one, while fresh
-  # installs still receive the shipped default.
   while IFS= read -r -d '' config_dir; do
     config_name="${config_dir##*/}"
 
-    [ "$config_name" = "aurora.toml" ] && continue
-
-    exclude_name="$(preserve_child_for "$config_name")"
-
-    if [ -n "$exclude_name" ]; then
-      copy_children_without "$config_dir" "$config_dest/$config_name" "$exclude_name"
+    if [ "$config_name" = "hypr" ]; then
+      copy_hypr_children_without_user "$config_dir" "$config_dest/$config_name"
       continue
     fi
 
@@ -1589,128 +1324,12 @@ copy_dotfiles() {
   done < <(find "$config_src" -mindepth 1 -maxdepth 1 -print0)
 
   log_command "Configuration files installed"
-  print_success "Configuration files installed successfully (backup: $BACKUP_DIR)"
-}
-
-# Name of the "protected" child inside a config dir that must survive the
-# copy, or empty string if the whole dir can be replaced freely.
-preserve_child_for() {
-  case "$1" in
-    hypr) echo "User" ;;
-    aurora) echo "palette.toml" ;;
-  esac
-}
-
-# Copy every child of a source dir. The named child is skipped only when it
-# already exists at the destination, so existing personal tweaks (hypr/User,
-# aurora/palette.toml) survive while fresh installs still get the shipped files.
-copy_children_without() {
-  local src_dir="$1"
-  local dest_dir="$2"
-  local exclude_name="$3"
-  local item
-  local item_name
-
-  [ -d "$src_dir" ] || return 0
-  mkdir -p "$dest_dir"
-
-  while IFS= read -r -d '' item; do
-    item_name="${item##*/}"
-    if [ "$item_name" = "$exclude_name" ] && [ -e "$dest_dir/$item_name" ]; then
-      continue
-    fi
-    cp -rfv "$item" "$dest_dir/"
-  done < <(find "$src_dir" -mindepth 1 -maxdepth 1 -print0)
-}
-
-# Back up every child of a source dir except the named one.
-backup_children_without() {
-  local src_dir="$1"
-  local backup_dir="$2"
-  local exclude_name="$3"
-  local item
-  local item_name
-
-  [ -d "$src_dir" ] || return 0
-  mkdir -p "$backup_dir"
-
-  while IFS= read -r -d '' item; do
-    item_name="${item##*/}"
-    [ "$item_name" = "$exclude_name" ] && continue
-    cp -r "$item" "$backup_dir/"
-  done < <(find "$src_dir" -mindepth 1 -maxdepth 1 -print0)
-}
-
-# Remove every child of a dir except the named one.
-remove_children_without() {
-  local target_dir="$1"
-  local exclude_name="$2"
-  local item
-  local item_name
-
-  [ -d "$target_dir" ] || return 0
-
-  while IFS= read -r -d '' item; do
-    item_name="${item##*/}"
-    [ "$item_name" = "$exclude_name" ] && continue
-    rm -rf "$item"
-  done < <(find "$target_dir" -mindepth 1 -maxdepth 1 -print0)
-}
-
-# Ensure ~/.cargo/bin is on PATH for this installer process AND persisted
-# for future login shells. Idempotent - never adds duplicates.
-# Call it before ANY cargo/rustc use.
-ensure_cargo_bin_in_path() {
-  # 1) Current process: export immediately so `cargo install` etc. just work.
-  # Always applied - even in DRY_RUN - because exporting PATH has no
-  # persistent side effect and keeps dry-run tool detection accurate.
-  if ! cargo_bin_in_path; then
-    export PATH="$HOME/.cargo/bin:$PATH"
-    hash -r 2>/dev/null || true
-    log_info "Added ~/.cargo/bin to PATH for this installer process"
-  fi
-
-  if [ "${DRY_RUN:-false}" = true ]; then
-    log_debug "[DRY RUN] Would persist ~/.cargo/bin to ~/.profile, ~/.zprofile, rc files"
-    return 0
-  fi
-
-  # 2) Future shells: persist via ~/.profile (POSIX login shells: bash, sh,
-  # dash) and ~/.zprofile (zsh login shells). This covers display managers
-  # (SDDM/GDM), terminals, and non-interactive ssh - unlike ~/.bashrc which
-  # only affects interactive bash. The case-guard keeps it duplicate-free.
-  local profile_line='case ":$PATH:" in *":$HOME/.cargo/bin:"*) ;; *) export PATH="$HOME/.cargo/bin:$PATH" ;; esac'
-  local profile_file
-  for profile_file in "$HOME/.profile" "$HOME/.zprofile"; do
-    if [ ! -f "$profile_file" ]; then
-      {
-        echo ""
-        echo "# Aurora binaries (~/.cargo/bin on PATH)"
-        echo "$profile_line"
-      } >"$profile_file"
-      log_command "Created $profile_file with cargo bin PATH"
-    elif ! grep -qF 'export PATH="$HOME/.cargo/bin:$PATH"' "$profile_file"; then
-      {
-        echo ""
-        echo "# Aurora binaries (~/.cargo/bin on PATH)"
-        echo "$profile_line"
-      } >>"$profile_file"
-      log_command "Updated $profile_file with cargo bin PATH"
-    fi
-  done
+  print_success "Configuration files installed successfully"
 }
 
 # Set up shell configuration
 setup_shell_config() {
   next_step "Setting up shell configuration"
-
-  if [ "$DRY_RUN" = true ]; then
-    print_warning "[DRY RUN] Would export ~/.cargo/bin to PATH and persist it to ~/.profile, ~/.zprofile, ~/.bashrc, ~/.zshrc, fish config"
-    return 0
-  fi
-
-  # Make cargo bin available NOW (installer process) + persist for logins.
-  ensure_cargo_bin_in_path
 
   # Add ~/.cargo/bin to PATH if not already there
   local add_to_path="export PATH=\"\$HOME/.cargo/bin:\$PATH\""
@@ -1719,56 +1338,44 @@ setup_shell_config() {
   shell_name="$(basename "${SHELL:-}")"
 
   if ! cargo_bin_in_path; then
-    # Should never happen - ensure_cargo_bin_in_path exports above - but keep
-    # the flag semantics in case PATH was reset.
     path_was_missing=true
   fi
 
-  # For bash - create the file if missing so PATH is guaranteed set.
-  touch ~/.bashrc
-  if ! grep -q "\.cargo/bin" ~/.bashrc; then
-    echo "" >>~/.bashrc
-    echo "# Aurora binaries" >>~/.bashrc
-    echo "$add_to_path" >>~/.bashrc
-    print_success "Updated .bashrc"
-    log_command "Updated .bashrc with PATH"
-  else
-    log_debug ".bashrc already contains .cargo/bin"
+  # For bash
+  if [ -f ~/.bashrc ]; then
+    if ! grep -q "\.cargo/bin" ~/.bashrc; then
+      echo "" >>~/.bashrc
+      echo "# Aurora binaries" >>~/.bashrc
+      echo "$add_to_path" >>~/.bashrc
+      print_success "Updated .bashrc"
+      log_command "Updated .bashrc with PATH"
+    fi
   fi
 
-  # For zsh - create the file if missing so PATH is guaranteed set.
-  touch ~/.zshrc
-  if ! grep -q "\.cargo/bin" ~/.zshrc; then
-    echo "" >>~/.zshrc
-    echo "# Aurora binaries" >>~/.zshrc
-    echo "$add_to_path" >>~/.zshrc
-    print_success "Updated .zshrc"
-    log_command "Updated .zshrc with PATH"
-  else
-    log_debug ".zshrc already contains .cargo/bin"
+  # For zsh
+  if [ -f ~/.zshrc ]; then
+    if ! grep -q "\.cargo/bin" ~/.zshrc; then
+      echo "" >>~/.zshrc
+      echo "# Aurora binaries" >>~/.zshrc
+      echo "$add_to_path" >>~/.zshrc
+      print_success "Updated .zshrc"
+      log_command "Updated .zshrc with PATH"
+    fi
   fi
 
-  # For fish - create config if missing, use fish-native PATH syntax.
-  mkdir -p ~/.config/fish
-  touch ~/.config/fish/config.fish
-  if ! grep -q "\.cargo/bin" ~/.config/fish/config.fish; then
-    echo "" >>~/.config/fish/config.fish
-    echo "# Aurora binaries" >>~/.config/fish/config.fish
-    echo 'fish_add_path $HOME/.cargo/bin' >>~/.config/fish/config.fish
-    print_success "Updated fish config"
-    log_command "Updated fish config.fish with PATH"
-  else
-    log_debug "fish config already contains .cargo/bin"
-  fi
-
-  # Belt-and-suspenders: current process must have it (verify, don't assume).
-  if ! cargo_bin_in_path; then
-    export PATH="$HOME/.cargo/bin:$PATH"
-    hash -r 2>/dev/null || true
-    path_was_missing=true
+  # For fish
+  if [ -f ~/.config/fish/config.fish ]; then
+    if ! grep -q "\.cargo/bin" ~/.config/fish/config.fish; then
+      echo "" >>~/.config/fish/config.fish
+      echo "# Aurora binaries" >>~/.config/fish/config.fish
+      echo "set -gx PATH \$HOME/.cargo/bin \$PATH" >>~/.config/fish/config.fish
+      print_success "Updated fish config"
+      log_command "Updated fish config.fish with PATH"
+    fi
   fi
 
   if [ "$path_was_missing" = true ]; then
+    export PATH="$HOME/.cargo/bin:$PATH"
     print_warning "Aurora binaries were added to shell config, but your current terminal may need to reload PATH."
     case "$shell_name" in
     fish)
@@ -1791,12 +1398,8 @@ setup_shell_config() {
 verify_installation() {
   next_step "Verifying installation"
 
-  # PATH must be set before checking `command -v <bin>`: re-assert it here
-  # (covers the case where the shell reordered steps or PATH was reset).
-  ensure_cargo_bin_in_path
-
   local cargo_bin="$HOME/.cargo/bin"
-  local script_dir="$HOME/.config/hypr/scripts"
+  local script_dir="$SCRIPT_DIR/dotfiles/.config/hypr/scripts"
   local required_bins=()
   local missing_bins=()
   local bin
@@ -1835,26 +1438,6 @@ verify_installation() {
     echo "  Example installed binary: $cargo_bin/$first_bin"
     echo "  Reload your shell, then run: command -v $first_bin"
   fi
-}
-
-# pacman serializes every transaction with /var/lib/pacman/db.lck. A lock
-# held by a live process is normal; a stale lock left by a killed process
-# makes every following pacman call fail with "unable to lock database".
-# Only remove a lock that is NOT held by a running package manager.
-clear_stale_pacman_lock() {
-  local pacman_lock="/var/lib/pacman/db.lck"
-
-  pgrep -x pacman &>/dev/null && return 1
-  pgrep -x yay &>/dev/null && return 1
-  pgrep -x makepkg &>/dev/null && return 1
-
-  if [ -e "$pacman_lock" ]; then
-    print_warning "Removing stale pacman database lock: $pacman_lock"
-    log_warn "Removing stale pacman database lock: $pacman_lock"
-    sudo rm -f -- "$pacman_lock" || return 1
-  fi
-
-  return 0
 }
 
 wait_for_pacman_settle() {
@@ -2052,7 +1635,6 @@ EOF
     if [[ $REPLY =~ ^[Yy]$ ]]; then
       print_warning "Restoring configs..."
       restore_config_from_backup "hypr" "$latest_backup"
-      restore_config_from_backup "aurora" "$latest_backup"
       restore_config_from_backup "waybar" "$latest_backup"
       restore_config_from_backup "kitty" "$latest_backup"
       restore_config_from_backup "fish" "$latest_backup"
@@ -2168,7 +1750,7 @@ Options:
   --help              Show this help message
   --dry-run           Preview changes without applying them
   --uninstall         Uninstall Aurora and restore backups
-  --non-interactive   Run without user prompts (auto-install packages, incl. toolchain)
+  --non-interactive   Run without user prompts (skip packages & Hyprland check)
   --debug             Show detailed debug information and logs
 
 Examples:
@@ -2214,23 +1796,7 @@ main() {
   esac
 
   prepare_install_log
-  tui_init
   initialize_logging
-  # initialize_logging re-pipes stdout through tee (so `[ -t 1 ]` is false from
-  # here on). Stick with the pre-redirect TTY decision recorded in tui_init:
-  # on a real terminal the violet codes ride through tee to the screen.
-  if [ "$TUI_ACTIVE" = true ] && [ "$TUI_STDOUT_IS_TTY" != true ]; then
-    NC="$RESET"
-    TUI_BG=''
-    TUI_ACTIVE=false
-    trap - EXIT INT TERM
-  fi
-
-  # ~/.cargo/bin must be on PATH before ANY tool detection (cargo/rustup in
-  # check_dependencies, install_packages, etc.). Export + persist early so
-  # both the installer process and all future shells see Aurora binaries.
-  # Uses only logging helpers (safe before banner/steps).
-  ensure_cargo_bin_in_path
 
   log_info "Aurora Installation Started"
   log_debug "Script location: $SCRIPT_DIR"
@@ -2261,29 +1827,17 @@ main() {
 
   if [ "$DRY_RUN" = false ]; then
     install_sddm_theme
-    # Configs MUST be moved before compiling the scripts folder: the Rust
-    # scripts embed/validate config paths at build time, so building first
-    # leaves them pointing at stale/missing config locations.
-    copy_dotfiles
-    setup_shell_config
     build_rust_scripts
     install_rust_packages
     install_waytrogen_aurora
     setup_lazyvim
+    copy_dotfiles
+    setup_shell_config
     verify_installation
     apply_default_theme
   else
     next_step "Installing SDDM astronaut theme"
     print_warning "[DRY RUN] Would clone/configure the SDDM astronaut theme and install fonts"
-
-    next_step "Installing configuration files"
-    print_warning "[DRY RUN] Would copy configuration files"
-
-    next_step "Setting up shell configuration"
-    print_warning "[DRY RUN] Would update shell PATH"
-
-    next_step "Ensuring Rust and C/C++ toolchains"
-    print_warning "[DRY RUN] Would ensure rustup/cargo/base-devel/clang are installed"
 
     next_step "Building and installing Rust scripts"
     print_warning "[DRY RUN] Would build and install Rust scripts"
@@ -2295,6 +1849,12 @@ main() {
 
     next_step "Installing LazyVim starter"
     print_warning "[DRY RUN] Would backup Neovim files and install LazyVim starter"
+
+    next_step "Installing configuration files"
+    print_warning "[DRY RUN] Would copy configuration files"
+
+    next_step "Setting up shell configuration"
+    print_warning "[DRY RUN] Would update shell PATH"
 
     next_step "Verifying installation"
     print_warning "[DRY RUN] Would verify installed binaries and PATH"
