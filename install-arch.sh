@@ -778,7 +778,6 @@ install_packages() {
     [ui]="
             waybar
             rofi
-            wlogout
             gtk3
             gtk4
             qt6-svg
@@ -809,6 +808,7 @@ install_packages() {
             wiremix
             bluetui
             btop
+            ghostty
             xcb-util-cursor
         "
     [build]="
@@ -833,6 +833,7 @@ install_packages() {
             zen-browser-bin
             weathr-bin
             jolt
+            wlogout
             leenfetch
             yaru-icon-theme
             yaru-gtk-theme
