@@ -1549,6 +1549,39 @@ apply_default_theme() {
   log_info "Applied default theme - Aurora Default"
 }
 
+apply_aurora_theme() {
+  next_step "Applying Aurora theme"
+
+  local aurora_bin
+
+  aurora_bin="$(command -v aurora || true)"
+  if [ -z "$aurora_bin" ] && [ -x "$HOME/.cargo/bin/aurora" ]; then
+    aurora_bin="$HOME/.cargo/bin/aurora"
+  fi
+
+  if [ -z "$aurora_bin" ]; then
+    DEFAULT_THEME_STATUS="failed: aurora binary not found"
+    print_error "Cannot apply Aurora theme because the aurora binary was not found"
+    return 1
+  fi
+
+  log_info "Starting awww-daemon before applying Aurora theme"
+  awww-daemon >/dev/null 2>&1 &
+
+  log_info "Applying Aurora theme silently using $aurora_bin"
+  if "$aurora_bin" theme -apply "Aurora Default" >/dev/null 2>&1; then
+    DEFAULT_THEME_STATUS="applied: Aurora Default"
+    print_success "Applied Aurora theme"
+
+    log_info "Restarting waybar after theme application"
+    pkill -f waybar >/dev/null 2>&1 || true
+  else
+    DEFAULT_THEME_STATUS="failed: could not apply Aurora theme"
+    print_error "Failed to apply Aurora theme"
+    return 1
+  fi
+}
+
 # Check for existing Aurora installation
 check_existing_install() {
   local has_aurora=false
@@ -1872,6 +1905,11 @@ main() {
 
   if [ "$DRY_RUN" = false ]; then
     switch_to_sudo_rs
+    apply_aurora_theme
+  else
+    next_step "Applying Aurora theme"
+    DEFAULT_THEME_STATUS="dry-run: would apply Aurora Default"
+    print_warning "[DRY RUN] Would apply Aurora theme - Aurora Default"
   fi
 
   log_command "Aurora Installation Completed Successfully"
