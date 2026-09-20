@@ -1570,7 +1570,7 @@ apply_aurora_theme() {
   awww-daemon >/dev/null 2>&1 &
 
   log_info "Applying Aurora theme silently using $aurora_bin"
-  if "$aurora_bin" theme -apply "Aurora Default" >/dev/null 2>&1; then
+  if "$aurora_bin" apply-theme "Aurora Default" >/dev/null 2>&1; then
     DEFAULT_THEME_STATUS="applied: Aurora Default"
     print_success "Applied Aurora theme"
 
