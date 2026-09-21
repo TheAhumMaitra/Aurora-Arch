@@ -837,6 +837,7 @@ install_packages() {
             leenfetch
             yaru-icon-theme
             yaru-gtk-theme
+            snappy-switcher
         "
   )
 
