@@ -838,6 +838,7 @@ install_packages() {
             yaru-icon-theme
             yaru-gtk-theme
             snappy-switcher
+            hyprmoncfg-bin
         "
   )
 
