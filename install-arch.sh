@@ -810,8 +810,8 @@ install_packages() {
             btop
             ghostty
             xcb-util-cursor
-            papers
-            showtime
+            evince
+            parole
         "
     [build]="
             git
