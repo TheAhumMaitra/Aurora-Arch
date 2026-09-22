@@ -811,6 +811,7 @@ install_packages() {
             ghostty
             xcb-util-cursor
             papers
+            showtime
         "
     [build]="
             git
