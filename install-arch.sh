@@ -812,6 +812,7 @@ install_packages() {
             xcb-util-cursor
             evince
             parole
+            eog
         "
     [build]="
             git
