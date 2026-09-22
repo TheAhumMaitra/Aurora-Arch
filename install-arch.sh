@@ -810,6 +810,7 @@ install_packages() {
             btop
             ghostty
             xcb-util-cursor
+            papers
         "
     [build]="
             git
